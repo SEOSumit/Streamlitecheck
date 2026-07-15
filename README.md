@@ -40,6 +40,8 @@ A **Link Check Summary** sheet is also added.
 
 ## HTML Sitemap Audit
 
-Upload one file with URLs in column A, status codes in column B, and final redirect URLs in column C. The tool fetches the HTML sitemap once by default and does not visit every URL. If a sitemap link is 3xx and column C contains its final destination, `Suggested Link` is populated automatically. Saved HTML upload and pasted source remain available only as fallbacks.
+Upload one file with URLs in column A, status codes in column B, and final redirect URLs in column C. The tool collects links from the rendered DOM using the same `document.querySelectorAll('a')` concept as Chrome DevTools. Automatic Chromium mode is available, with a reliable Chrome paste fallback when the CDN blocks cloud browser automation.
+
+The audit cannot be generated until the collected link count and sample are reviewed and confirmed. This prevents incomplete raw-source collections from producing incorrect workbooks.
 
 The user can audit the complete sitemap or only URLs containing a folder pattern such as `/servers-storage/`. Clean and parameterized versions are treated as the same URL. The output is an `.xlsx` workbook with the exact three-sheet audit structure: Summary, Existing URLs in HTML Sitemap, and URLs Not in HTML Sitemap. Only missing 200-status URLs are added to the final sheet; suggested anchor text remains blank.

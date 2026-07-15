@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import html as html_lib
+import os
 import re
+import time
 import unicodedata
 import zipfile
 from copy import copy
@@ -260,6 +262,122 @@ def parse_sitemap_anchors(source: str, sitemap_url: str) -> list[dict[str, str]]
     return anchors
 
 
+def parse_rendered_links_text(text: str, sitemap_url: str) -> list[dict[str, str]]:
+    """Parse newline URLs or tab-separated URL + anchor text copied from Chrome."""
+    sitemap_host = (urlsplit(sitemap_url).hostname or "").casefold()
+    links: list[dict[str, str]] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            url_value, anchor = line.split("\t", 1)
+        else:
+            url_value, anchor = line, ""
+        absolute = urljoin(sitemap_url, url_value.strip())
+        if not absolute.casefold().startswith(("http://", "https://")):
+            continue
+        if (urlsplit(absolute).hostname or "").casefold() != sitemap_host:
+            continue
+        parts = urlsplit(absolute)
+        url_value = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+        links.append(
+            {
+                "url": url_value,
+                "anchor": normalize_text(anchor),
+                "normalized": normalize_compare_url(url_value),
+            }
+        )
+    if not links:
+        raise ValueError("No same-domain rendered links were found in the pasted data.")
+    return links
+
+
+def collect_rendered_links_browser(sitemap_url: str, timeout: int = 55) -> list[dict[str, str]]:
+    """Open the page in Chromium and run the rendered-DOM equivalent of querySelectorAll('a')."""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.support.ui import WebDriverWait
+    except ImportError as exc:
+        raise ValueError("Browser automation dependency is not installed. Use the Chrome paste method.") from exc
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(f"--user-agent={USER_AGENT}")
+    if os.path.exists("/usr/bin/chromium"):
+        options.binary_location = "/usr/bin/chromium"
+
+    driver = None
+    try:
+        if os.path.exists("/usr/bin/chromedriver"):
+            driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=options)
+        else:
+            driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(timeout)
+        driver.get(sitemap_url)
+        WebDriverWait(driver, min(timeout, 35)).until(
+            lambda current: current.execute_script("return document.readyState") == "complete"
+        )
+        previous_height = 0
+        for _ in range(6):
+            height = int(driver.execute_script("return document.body.scrollHeight || 0"))
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(0.7)
+            if height == previous_height:
+                break
+            previous_height = height
+        raw_links = driver.execute_script(
+            """
+            return [...document.querySelectorAll('a')].map(a => ({
+              url: a.href || '',
+              anchor: (a.innerText || a.textContent || '').trim().replace(/\\s+/g, ' ')
+            }));
+            """
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"Rendered browser collection failed: {exc}. Use the Chrome paste method instead."
+        ) from exc
+    finally:
+        if driver is not None:
+            driver.quit()
+
+    sitemap_host = (urlsplit(sitemap_url).hostname or "").casefold()
+    links = []
+    for item in raw_links or []:
+        url_value = str(item.get("url") or "").strip()
+        if not url_value.casefold().startswith(("http://", "https://")):
+            continue
+        if (urlsplit(url_value).hostname or "").casefold() != sitemap_host:
+            continue
+        parts = urlsplit(url_value)
+        url_value = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+        links.append(
+            {
+                "url": url_value,
+                "anchor": normalize_text(item.get("anchor", "")),
+                "normalized": normalize_compare_url(url_value),
+            }
+        )
+    if not links:
+        raise ValueError("The rendered page returned no same-domain links. Use the Chrome paste method.")
+    return links
+
+
+def try_fetch_raw_source(sitemap_url: str) -> str | None:
+    try:
+        source, _, _ = fetch_sitemap_html(sitemap_url)
+        return source
+    except ValueError:
+        return None
+
+
 def _in_scope(url: str, mode: str, pattern: str) -> bool:
     if mode == "Complete HTML sitemap audit":
         return True
@@ -282,6 +400,11 @@ def suggest_anchor_text(url: str) -> str:
     return " ".join(ACRONYMS.get(word.casefold(), word.capitalize()) for word in words)
 
 
+def suggest_missing_anchor_for_future_ai(url: str, api_key: str | None = None) -> str:
+    """Extension point for a future AI anchor-text provider; intentionally blank today."""
+    return ""
+
+
 def _status_group(status: object) -> str:
     try:
         code = int(status)
@@ -297,7 +420,8 @@ def _status_group(status: object) -> str:
 def _audit_rows(
     uploaded_records: list[dict[str, object]],
     sitemap_anchors: list[dict[str, str]],
-    sitemap_source: str,
+    raw_source: str | None,
+    sitemap_url: str,
     mode: str,
     pattern: str,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -309,49 +433,34 @@ def _audit_rows(
     uploaded_map = {str(record["normalized"]): record for record in scoped_uploaded}
     sitemap_keys = {item["normalized"] for item in scoped_anchors}
 
+    raw_vanilla_keys: set[str] | None = None
+    if raw_source:
+        try:
+            raw_vanilla_keys = {
+                item["normalized"] for item in parse_sitemap_anchors(raw_source, sitemap_url)
+            }
+        except ValueError:
+            raw_vanilla_keys = set()
+
     existing = []
     for item in scoped_anchors:
         key = item["normalized"]
         uploaded = uploaded_map.get(key)
         status = uploaded["status"] if uploaded else ""
+        if raw_vanilla_keys is None:
+            in_source, source_type = "", ""
+        elif key in raw_vanilla_keys:
+            in_source, source_type = "Yes", "Vanilla HTML"
+        else:
+            in_source, source_type = "No", "JavaScript/Rendered DOM"
         existing.append(
             {
                 "url": item["url"],
                 "anchor": item["anchor"],
                 "status": status,
                 "in_sitemap": "Yes",
-                "in_source": "Yes",
-                "source_type": "Vanilla HTML",
-                "note": "",
-                "suggested_link": "",
-            }
-        )
-
-    # Some sitemap links are injected from JavaScript data and are not present as
-    # vanilla <a href> elements in the fetched source. Detect uploaded URLs that
-    # are referenced elsewhere in the raw HTML/JSON source and classify them.
-    searchable_source = html_lib.unescape(sitemap_source)
-    searchable_source = searchable_source.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
-    searchable_folded = searchable_source.casefold()
-    for record in scoped_uploaded:
-        key = str(record["normalized"])
-        if key in sitemap_keys:
-            continue
-        url = str(record["url"])
-        clean_url = clean_url_without_parameters(url)
-        path = urlsplit(clean_url).path
-        candidates = [clean_url.casefold(), path.casefold()]
-        if not any(candidate and candidate in searchable_folded for candidate in candidates):
-            continue
-        sitemap_keys.add(key)
-        existing.append(
-            {
-                "url": url,
-                "anchor": "",
-                "status": record["status"],
-                "in_sitemap": "Yes",
-                "in_source": "No",
-                "source_type": "JavaScript/JSON",
+                "in_source": in_source,
+                "source_type": source_type,
                 "note": "",
                 "suggested_link": "",
             }
@@ -367,7 +476,7 @@ def _audit_rows(
             {
                 "url": record["url"],
                 "status": record["status"],
-                "anchor": "",
+                "anchor": suggest_missing_anchor_for_future_ai(str(record["url"])),
             }
         )
     return existing, missing
@@ -470,7 +579,45 @@ def create_html_sitemap_audit(
 ) -> tuple[bytes, list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
     uploaded = load_url_status_records(url_status_data, url_status_filename)
     anchors = parse_sitemap_anchors(sitemap_source, sitemap_url)
-    existing, missing = _audit_rows(uploaded, anchors, sitemap_source, scope_mode, scope_pattern)
+    existing, missing = _audit_rows(uploaded, anchors, sitemap_source, sitemap_url, scope_mode, scope_pattern)
+    output = _build_audit_workbook(sitemap_url, existing, missing)
+    stats = {
+        "uploaded_urls": sum(_in_scope(str(r["url"]), scope_mode, scope_pattern) for r in uploaded),
+        "sitemap_links": len(existing),
+        "missing_urls": len(missing),
+        "sitemap_only": sum(str(r["status"]) == "" for r in existing),
+    }
+    return output, existing, missing, stats
+
+
+def create_html_sitemap_audit_from_links(
+    url_status_data: bytes,
+    url_status_filename: str,
+    rendered_links: list[dict[str, str]],
+    sitemap_url: str,
+    scope_mode: str,
+    scope_pattern: str = "",
+    raw_source: str | None = None,
+) -> tuple[bytes, list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
+    uploaded = load_url_status_records(url_status_data, url_status_filename)
+    sitemap_host = (urlsplit(sitemap_url).hostname or "").casefold()
+    anchors = []
+    for item in rendered_links:
+        url_value = str(item.get("url") or "").strip()
+        if (urlsplit(url_value).hostname or "").casefold() != sitemap_host:
+            continue
+        anchors.append(
+            {
+                "url": url_value,
+                "anchor": normalize_text(item.get("anchor", "")),
+                "normalized": normalize_compare_url(url_value),
+            }
+        )
+    if not anchors:
+        raise ValueError("No same-domain rendered sitemap links are available for the audit.")
+    existing, missing = _audit_rows(
+        uploaded, anchors, raw_source, sitemap_url, scope_mode, scope_pattern
+    )
     output = _build_audit_workbook(sitemap_url, existing, missing)
     stats = {
         "uploaded_urls": sum(_in_scope(str(r["url"]), scope_mode, scope_pattern) for r in uploaded),

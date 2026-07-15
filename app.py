@@ -5,7 +5,13 @@ import hashlib
 import streamlit as st
 
 from link_checker import output_filename, process_workbook, workbook_sheet_names
-from sitemap_checker import create_html_sitemap_audit, fetch_sitemap_html, sitemap_output_filename
+from sitemap_checker import (
+    collect_rendered_links_browser,
+    create_html_sitemap_audit_from_links,
+    parse_rendered_links_text,
+    sitemap_output_filename,
+    try_fetch_raw_source,
+)
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
@@ -98,8 +104,7 @@ def internal_link_checker() -> None:
 def html_sitemap_gap_checker() -> None:
     st.title("HTML Sitemap Audit")
     st.caption(
-        "Create one complete HTML sitemap audit workbook. The tool fetches only the sitemap page once "
-        "and never visits every listed URL."
+        "Collect links from the rendered HTML sitemap DOM, validate the collection, then create the exact Excel audit."
     )
 
     url_status_file = st.file_uploader(
@@ -112,19 +117,6 @@ def html_sitemap_gap_checker() -> None:
         "2. HTML sitemap page URL",
         placeholder="https://www.example.com/site-map/",
     )
-    source_mode = "Fetch sitemap page once"
-    html_upload = None
-    pasted_html = ""
-    with st.expander("Fallback only if automatic sitemap fetch is blocked"):
-        source_mode = st.radio(
-            "Sitemap source method",
-            ["Fetch sitemap page once", "Upload saved HTML file", "Paste HTML source"],
-            horizontal=True,
-        )
-        if source_mode == "Upload saved HTML file":
-            html_upload = st.file_uploader("Upload HTML file", type=["html", "htm", "txt"], key="html_source_file")
-        elif source_mode == "Paste HTML source":
-            pasted_html = st.text_area("Paste the complete HTML source", height=220)
 
     scope_mode = st.radio(
         "3. Audit scope",
@@ -134,40 +126,129 @@ def html_sitemap_gap_checker() -> None:
     if scope_mode != "Complete HTML sitemap audit":
         scope_pattern = st.text_input("Folder or URL text", placeholder="/servers-storage/")
 
-    if url_status_file and sitemap_url and st.button(
-        "Create HTML sitemap audit", type="primary", use_container_width=True
-    ):
-        with st.spinner("Reading sitemap source and preparing the audit…"):
-            try:
-                if source_mode == "Fetch sitemap page once":
-                    sitemap_source, final_sitemap_url, _ = fetch_sitemap_html(sitemap_url)
-                elif source_mode == "Upload saved HTML file":
-                    if not html_upload:
-                        raise ValueError("Upload the saved HTML source file.")
-                    sitemap_source = html_upload.getvalue().decode("utf-8", errors="replace")
-                    final_sitemap_url = sitemap_url
-                else:
-                    if not pasted_html.strip():
-                        raise ValueError("Paste the HTML source before creating the audit.")
-                    sitemap_source = pasted_html
-                    final_sitemap_url = sitemap_url
+    collection_method = st.radio(
+        "4. Collect rendered sitemap links",
+        ["Automatic rendered browser", "Paste links copied from Chrome"],
+        help="Automatic mode runs document.querySelectorAll('a') in Chromium. If Lenovo blocks it, use Chrome paste mode.",
+    )
 
-                output, existing, missing, stats = create_html_sitemap_audit(
-                    url_status_file.getvalue(),
-                    url_status_file.name,
-                    sitemap_source,
-                    final_sitemap_url,
-                    scope_mode,
-                    scope_pattern,
-                )
+    if st.session_state.get("sitemap_collection_method") != collection_method:
+        for key in (
+            "sitemap_collected_links", "sitemap_raw_source", "sitemap_output",
+            "sitemap_existing", "sitemap_missing", "sitemap_stats", "sitemap_filename",
+            "confirm_sitemap_collection",
+        ):
+            st.session_state.pop(key, None)
+        st.session_state["sitemap_collection_method"] = collection_method
+
+    pasted_links = ""
+    if collection_method == "Paste links copied from Chrome":
+        st.markdown(
+            "Open the HTML sitemap in Chrome, press **F12 → Console**, and run this improved command. "
+            "It copies both the rendered URL and its anchor text."
+        )
+        st.code(
+            'copy([...document.querySelectorAll("a")].map(a => `${a.href}\\t${(a.innerText || a.textContent || "").trim().replace(/\\s+/g, " ")}`).join("\\n"));',
+            language="javascript",
+        )
+        pasted_links = st.text_area(
+            "Paste the copied rendered links here",
+            height=240,
+            placeholder="https://www.example.com/page/\tAnchor Text",
+        )
+
+    signature = None
+    if url_status_file and sitemap_url:
+        signature = hashlib.sha256(
+            url_status_file.getvalue() + sitemap_url.strip().encode("utf-8")
+        ).hexdigest()
+        if st.session_state.get("sitemap_input_signature") != signature:
+            for key in (
+                "sitemap_collected_links", "sitemap_raw_source", "sitemap_output",
+                "sitemap_existing", "sitemap_missing", "sitemap_stats", "sitemap_filename",
+            ):
+                st.session_state.pop(key, None)
+            st.session_state["sitemap_input_signature"] = signature
+
+    if url_status_file and sitemap_url and st.button(
+        "Collect and preview sitemap links", type="primary", use_container_width=True
+    ):
+        with st.spinner("Collecting links from the rendered sitemap…"):
+            try:
+                if collection_method == "Automatic rendered browser":
+                    collected_links = collect_rendered_links_browser(sitemap_url)
+                else:
+                    if not pasted_links.strip():
+                        raise ValueError("Paste the rendered Chrome links before collecting.")
+                    collected_links = parse_rendered_links_text(pasted_links, sitemap_url)
+                raw_source = try_fetch_raw_source(sitemap_url)
             except Exception as exc:
                 st.error(str(exc))
             else:
-                st.session_state["sitemap_output"] = output
-                st.session_state["sitemap_existing"] = existing
-                st.session_state["sitemap_missing"] = missing
-                st.session_state["sitemap_stats"] = stats
-                st.session_state["sitemap_filename"] = sitemap_output_filename(url_status_file.name)
+                st.session_state["sitemap_collected_links"] = collected_links
+                st.session_state["sitemap_raw_source"] = raw_source
+                st.session_state.pop("confirm_sitemap_collection", None)
+                for key in ("sitemap_output", "sitemap_existing", "sitemap_missing", "sitemap_stats", "sitemap_filename"):
+                    st.session_state.pop(key, None)
+
+    if st.session_state.get("sitemap_collected_links"):
+        links = st.session_state["sitemap_collected_links"]
+        unique_links = len({link["normalized"] for link in links})
+        if scope_mode == "Complete HTML sitemap audit":
+            scoped_links = links
+        else:
+            scoped_links = [
+                link for link in links if scope_pattern.casefold().strip() in link["url"].casefold()
+            ]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Rendered link occurrences", len(links))
+        c2.metric("Unique rendered URLs", unique_links)
+        c3.metric("Links in selected scope", len(scoped_links))
+        if len(links) < 10:
+            st.error(
+                "Only a few links were collected. Do not generate the audit—switch to Chrome paste mode."
+            )
+        if st.session_state.get("sitemap_raw_source") is None:
+            st.warning(
+                "Raw source was blocked, so In HTML Source and Source Code Type will remain blank. "
+                "Rendered sitemap matching is still available."
+            )
+        st.markdown("**Collection sample**")
+        st.table(
+            [
+                {"URL": link["url"], "Anchor Text": link.get("anchor", "")}
+                for link in scoped_links[:10]
+            ]
+        )
+        confirmed = st.checkbox(
+            "I confirm the collected link count and sample look correct",
+            key="confirm_sitemap_collection",
+        )
+        if st.button(
+            "Create Excel Audit (.xlsx)",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirmed or not url_status_file or len(links) < 10,
+        ):
+            with st.spinner("Matching URLs and building the Excel template…"):
+                try:
+                    output, existing, missing, stats = create_html_sitemap_audit_from_links(
+                        url_status_file.getvalue(),
+                        url_status_file.name,
+                        links,
+                        sitemap_url,
+                        scope_mode,
+                        scope_pattern,
+                        st.session_state.get("sitemap_raw_source"),
+                    )
+                except Exception as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["sitemap_output"] = output
+                    st.session_state["sitemap_existing"] = existing
+                    st.session_state["sitemap_missing"] = missing
+                    st.session_state["sitemap_stats"] = stats
+                    st.session_state["sitemap_filename"] = sitemap_output_filename(url_status_file.name)
 
     if st.session_state.get("sitemap_stats"):
         stats = st.session_state["sitemap_stats"]
