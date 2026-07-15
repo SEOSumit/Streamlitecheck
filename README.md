@@ -25,7 +25,7 @@ Compares your master list of URLs against what's actually live on a site's HTML 
 
 You upload a sheet of URLs + status codes. You give it the sitemap page URL. It collects every link that page actually shows to a visitor (not just what's in the raw page source — some sites build their sitemap with JavaScript, so a plain fetch would miss links). If the site blocks automated browsing, there's a manual fallback: open the sitemap in Chrome, copy the links using a short console command, paste them in.
 
-**Output:** a 3-sheet Excel file —
+**Output:** a 3-sheets one excel file —
 - **Summary** — counts at a glance
 - **Existing URLs in HTML Sitemap** — every URL that's both on the sitemap and in your uploaded list
 - **URLs Not in HTML Sitemap** — URLs from your list (status 200 only) that are missing from the sitemap
