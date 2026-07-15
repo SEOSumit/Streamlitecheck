@@ -5,7 +5,7 @@ import html as html_lib
 import re
 import unicodedata
 import zipfile
-from collections import Counter
+from copy import copy
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO, StringIO
@@ -297,6 +297,7 @@ def _status_group(status: object) -> str:
 def _audit_rows(
     uploaded_records: list[dict[str, object]],
     sitemap_anchors: list[dict[str, str]],
+    sitemap_source: str,
     mode: str,
     pattern: str,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -307,37 +308,12 @@ def _audit_rows(
 
     uploaded_map = {str(record["normalized"]): record for record in scoped_uploaded}
     sitemap_keys = {item["normalized"] for item in scoped_anchors}
-    url_counts = Counter(item["normalized"] for item in scoped_anchors)
-    anchor_counts = Counter(normalize_text(item["anchor"]).casefold() for item in scoped_anchors if item["anchor"])
 
     existing = []
     for item in scoped_anchors:
         key = item["normalized"]
         uploaded = uploaded_map.get(key)
         status = uploaded["status"] if uploaded else ""
-        notes = []
-        suggested_link = ""
-        if not uploaded:
-            notes.append("Manually verify: URL is in the HTML sitemap but missing from the uploaded URL/status list")
-        if url_counts[key] > 1:
-            notes.append("Duplicate Link")
-        anchor_key = normalize_text(item["anchor"]).casefold()
-        if anchor_key and anchor_counts[anchor_key] > 1:
-            notes.append("Duplicate Anchor")
-        if _status_group(status) == "3xx":
-            notes.append("Review redirecting link")
-            if uploaded and uploaded.get("final_redirect_url"):
-                suggested_link = clean_url_without_parameters(str(uploaded["final_redirect_url"]))
-        elif status not in (None, "") and _status_group(status) == "other":
-            try:
-                if int(status) >= 400:
-                    notes.append("Remove or replace broken link")
-            except (TypeError, ValueError):
-                pass
-        if urlsplit(item["url"]).query:
-            notes.append("Replace parameterized link with clean URL")
-            if not suggested_link:
-                suggested_link = clean_url_without_parameters(item["url"])
         existing.append(
             {
                 "url": item["url"],
@@ -346,8 +322,38 @@ def _audit_rows(
                 "in_sitemap": "Yes",
                 "in_source": "Yes",
                 "source_type": "Vanilla HTML",
-                "note": " | ".join(dict.fromkeys(notes)),
-                "suggested_link": suggested_link,
+                "note": "",
+                "suggested_link": "",
+            }
+        )
+
+    # Some sitemap links are injected from JavaScript data and are not present as
+    # vanilla <a href> elements in the fetched source. Detect uploaded URLs that
+    # are referenced elsewhere in the raw HTML/JSON source and classify them.
+    searchable_source = html_lib.unescape(sitemap_source)
+    searchable_source = searchable_source.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+    searchable_folded = searchable_source.casefold()
+    for record in scoped_uploaded:
+        key = str(record["normalized"])
+        if key in sitemap_keys:
+            continue
+        url = str(record["url"])
+        clean_url = clean_url_without_parameters(url)
+        path = urlsplit(clean_url).path
+        candidates = [clean_url.casefold(), path.casefold()]
+        if not any(candidate and candidate in searchable_folded for candidate in candidates):
+            continue
+        sitemap_keys.add(key)
+        existing.append(
+            {
+                "url": url,
+                "anchor": "",
+                "status": record["status"],
+                "in_sitemap": "Yes",
+                "in_source": "No",
+                "source_type": "JavaScript/JSON",
+                "note": "",
+                "suggested_link": "",
             }
         )
 
@@ -355,11 +361,13 @@ def _audit_rows(
     for record in scoped_uploaded:
         if record["normalized"] in sitemap_keys:
             continue
+        if _status_group(record["status"]) != "200":
+            continue
         missing.append(
             {
                 "url": record["url"],
                 "status": record["status"],
-                "anchor": suggest_anchor_text(str(record["url"])),
+                "anchor": "",
             }
         )
     return existing, missing
@@ -395,60 +403,57 @@ def _build_audit_workbook(
     existing: list[dict[str, object]],
     missing: list[dict[str, object]],
 ) -> bytes:
-    wb = Workbook()
-    summary = wb.active
-    summary.title = "Summary"
-    existing_ws = wb.create_sheet("Existing Pages in HTML Sitemap")
-    missing_ws = wb.create_sheet("URLs Not in HTML Sitemap")
+    template_path = Path(__file__).with_name("html_sitemap_template.xlsx")
+    if not template_path.exists():
+        raise ValueError("HTML sitemap Excel template is missing from the deployed app.")
+    wb = load_workbook(template_path)
+    summary = wb["Summary"]
+    existing_ws = wb["Existing URLs in HTML Sitemap"]
+    missing_ws = wb["URLs Not in HTML Sitemap"]
 
     summary["A1"] = f"Sitemap URL: {sitemap_url}"
-    summary.merge_cells("A1:B1")
-    summary.append(["Sheet", "Pages With 200 Status Code", "Pages With 3xx Pages", "Total Number of URLs"])
-    summary.append([
-        "IN Existing",
-        sum(_status_group(row["status"]) == "200" for row in existing),
-        sum(_status_group(row["status"]) == "3xx" for row in existing),
-        len(existing),
-    ])
-    summary.append([
-        "URLs Not in HTML Sitemap",
-        sum(_status_group(row["status"]) == "200" for row in missing),
-        sum(_status_group(row["status"]) == "3xx" for row in missing),
-        len(missing),
-    ])
-    blue_fill = PatternFill("solid", fgColor="D9EAF7")
-    thin = Side(style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    for row in summary.iter_rows(min_row=1, max_row=4, min_col=1, max_col=4):
-        for cell in row:
-            cell.font = Font(name="Aptos Narrow", size=11, bold=cell.row in {1, 2})
-            cell.border = border
-            cell.alignment = Alignment(horizontal="left" if cell.column == 1 else "center", vertical="center")
-            if cell.row in {1, 2}:
-                cell.fill = blue_fill
-    summary.column_dimensions["A"].width = 31
-    for column in ("B", "C", "D"):
-        summary.column_dimensions[column].width = 31
+    summary["B3"] = sum(_status_group(row["status"]) == "200" for row in existing)
+    summary["C3"] = sum(_status_group(row["status"]) == "3xx" for row in existing)
+    summary["D3"] = len(existing)
+    summary["B4"] = len(missing)
+    summary["C4"] = 0
+    summary["D4"] = len(missing)
 
-    existing_ws.append([
-        "URL", "Anchor Text", "Status Code", "In HTML Sitemap", "In HTML Source",
-        "Source Code Type", "Note For Developer", "Suggested Link",
-    ])
-    for row in existing:
-        existing_ws.append([
+    def clear_values(ws, start_row: int) -> None:
+        for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row):
+            for cell in row:
+                cell.value = None
+
+    def ensure_styled_row(ws, target_row: int, template_row: int, columns: int) -> None:
+        if target_row <= ws.max_row:
+            return
+        for column in range(1, columns + 1):
+            source = ws.cell(template_row, column)
+            target = ws.cell(target_row, column)
+            target._style = copy(source._style)
+            if source.has_style:
+                target.number_format = source.number_format
+            target.alignment = copy(source.alignment)
+            target.protection = copy(source.protection)
+        ws.row_dimensions[target_row].height = ws.row_dimensions[template_row].height
+
+    clear_values(existing_ws, 2)
+    for index, row in enumerate(existing, 2):
+        ensure_styled_row(existing_ws, index, 2, 8)
+        values = [
             row["url"], row["anchor"], row["status"], row["in_sitemap"], row["in_source"],
-            row["source_type"], row["note"], row["suggested_link"],
-        ])
-    _apply_table_style(
-        existing_ws,
-        [76.43, 48.86, 20.71, 27, 23.71, 37.71, 45.57, 75],
-        ["left", "left", "center", "center", "center", "center", "center", "left"],
-    )
+            row["source_type"], "", "",
+        ]
+        for column, value in enumerate(values, 1):
+            existing_ws.cell(index, column).value = value
+    existing_ws.auto_filter.ref = f"A1:H{max(1, len(existing) + 1)}"
 
-    missing_ws.append(["URLs Missing in HTML Sitemap", "Status Code", "Suggested Anchor Text"])
-    for row in missing:
-        missing_ws.append([row["url"], row["status"], row["anchor"]])
-    _apply_table_style(missing_ws, [99.57, 28.14, 40.86], ["left", "center", "left"])
+    clear_values(missing_ws, 2)
+    for index, row in enumerate(missing, 2):
+        ensure_styled_row(missing_ws, index, 2, 3)
+        missing_ws.cell(index, 1).value = row["url"]
+        missing_ws.cell(index, 2).value = row["status"]
+        missing_ws.cell(index, 3).value = ""
 
     output = BytesIO()
     wb.save(output)
@@ -465,13 +470,13 @@ def create_html_sitemap_audit(
 ) -> tuple[bytes, list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
     uploaded = load_url_status_records(url_status_data, url_status_filename)
     anchors = parse_sitemap_anchors(sitemap_source, sitemap_url)
-    existing, missing = _audit_rows(uploaded, anchors, scope_mode, scope_pattern)
+    existing, missing = _audit_rows(uploaded, anchors, sitemap_source, scope_mode, scope_pattern)
     output = _build_audit_workbook(sitemap_url, existing, missing)
     stats = {
         "uploaded_urls": sum(_in_scope(str(r["url"]), scope_mode, scope_pattern) for r in uploaded),
         "sitemap_links": len(existing),
         "missing_urls": len(missing),
-        "sitemap_only": sum("missing from the uploaded" in str(r["note"]) for r in existing),
+        "sitemap_only": sum(str(r["status"]) == "" for r in existing),
     }
     return output, existing, missing, stats
 

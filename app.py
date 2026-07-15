@@ -177,15 +177,14 @@ def html_sitemap_gap_checker() -> None:
         c3.metric("Missing URLs", stats["missing_urls"])
         c4.metric("Sitemap-only links", stats["sitemap_only"])
         st.download_button(
-            "Download HTML sitemap audit",
-            st.session_state["sitemap_output"],
-            st.session_state["sitemap_filename"],
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Download Excel Audit (.xlsx)",
+            data=st.session_state["sitemap_output"],
+            file_name=st.session_state["sitemap_filename"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True,
         )
-        st.subheader("URLs not in HTML sitemap")
-        st.dataframe(st.session_state["sitemap_missing"], use_container_width=True, hide_index=True)
+        st.success("Excel workbook ready with Summary, Existing URLs, and URLs Not in HTML Sitemap sheets.")
 
 
 if selected_tool == "Internal Link Checker":
