@@ -1,6 +1,9 @@
-# Internal Link Implementation Checker
+# SEO Toolkit
 
-This tool checks whether each suggested internal link is implemented in the specified paragraph.
+The Streamlit app currently includes:
+
+- Internal Link Implementation Checker
+- HTML Sitemap Audit
 
 ## Run on Windows
 
@@ -32,3 +35,9 @@ The original workbook is preserved and the tool adds:
 - Checked At
 
 A **Link Check Summary** sheet is also added.
+
+## HTML Sitemap Audit
+
+Upload one file with URLs in column A, status codes in column B, and final redirect URLs in column C. The tool fetches the HTML sitemap once by default and does not visit every URL. If a sitemap link is 3xx and column C contains its final destination, `Suggested Link` is populated automatically. Saved HTML upload and pasted source remain available only as fallbacks.
+
+The user can audit the complete sitemap or only URLs containing a folder pattern such as `/servers-storage/`. Clean and parameterized versions are treated as the same URL. The output matches the three-sheet audit format: Summary, Existing Pages in HTML Sitemap, and URLs Not in HTML Sitemap.
