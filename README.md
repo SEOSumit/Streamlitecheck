@@ -1,47 +1,50 @@
-# SEO Toolkit
+# SEO Toolkit — Beta
 
-The Streamlit app currently includes:
+**Status: Beta.** This is an internal tool under active development. Features, output format, and behavior may change without notice. Not for external/client distribution yet.
 
-- Internal Link Implementation Checker
-- HTML Sitemap Audit
+---
 
-The deployment must include `html_sitemap_template.xlsx` in the same folder as `app.py`.
+## What this does
 
-## Run on Windows
+Two tools, one app:
 
-1. Install Python 3.10 or newer if it is not already installed.
-2. Double-click `run_tool.bat`.
-3. A browser window will open.
-4. Upload the `.xlsx` sheet, click **Check internal links**, and download the result.
+### 1. Internal Link Implementation Checker
+Checks whether a suggested internal link has actually been implemented on a live page.
 
-## Result rule
+You give it a spreadsheet where each row says: "on this page, in this paragraph, this anchor text should link to this URL." The tool visits the page and confirms whether that exact anchor is linked to that exact URL inside that specific paragraph — not just linked *somewhere* on the page.
 
-`Implemented` requires all three conditions:
+A row only counts as **Implemented** if all three are true:
+- The specified paragraph exists on the page
+- The exact anchor text is a link inside that paragraph
+- That link points to the suggested URL (relative links / trailing slashes count as the same URL)
 
-1. The specified paragraph is present on the source page.
-2. The exact suggested anchor text is an `<a>` link inside that paragraph.
-3. The anchor destination matches the suggested hyperlink.
+**Output:** your original sheet, plus columns for Implementation Status, the actual hyperlink found (if any), a short explanation, and the page's HTTP status — so you can tell "not implemented" apart from "page is broken/blocked."
 
-Relative links and trailing-slash differences are treated as equivalent. A link elsewhere on the page does not count.
+### 2. HTML Sitemap Audit
+Compares your master list of URLs against what's actually live on a site's HTML sitemap page.
 
-## Output
+You upload a sheet of URLs + status codes. You give it the sitemap page URL. It collects every link that page actually shows to a visitor (not just what's in the raw page source — some sites build their sitemap with JavaScript, so a plain fetch would miss links). If the site blocks automated browsing, there's a manual fallback: open the sitemap in Chrome, copy the links using a short console command, paste them in.
 
-The original workbook is preserved and the tool adds:
+**Output:** a 3-sheet Excel file —
+- **Summary** — counts at a glance
+- **Existing URLs in HTML Sitemap** — every URL that's both on the sitemap and in your uploaded list
+- **URLs Not in HTML Sitemap** — URLs from your list (status 200 only) that are missing from the sitemap
 
-- Source Page URL
-- Implementation Status
-- Actual Hyperlink Found
-- Check Details
-- Page HTTP Status
-- Final Page URL
-- Checked At
+Before it builds the file, it shows you a sample of what it collected so you can confirm the count looks right — this stops it from silently generating a wrong report off an incomplete page load.
 
-A **Link Check Summary** sheet is also added.
+---
 
-## HTML Sitemap Audit
+## Access
 
-Upload one file with URLs in column A, status codes in column B, and final redirect URLs in column C. The tool collects links from the rendered DOM using the same `document.querySelectorAll('a')` concept as Chrome DevTools. Automatic Chromium mode is available, with a reliable Chrome paste fallback when the CDN blocks cloud browser automation.
+Access the tool here: https://basiccheck.streamlit.app/
 
-The audit cannot be generated until the collected link count and sample are reviewed and confirmed. This prevents incomplete raw-source collections from producing incorrect workbooks.
+## Rules of use (internal)
+- Don't share this app or its output files outside the team without checking first.
+- Don't run it against a client's live site without their knowledge if it involves repeated automated visits — treat it like any crawl and be considerate of load.
+- Report bad/incorrect output immediately rather than trusting a run blindly — it's beta, verify before you send anything to a client.
 
-The user can audit the complete sitemap or only URLs containing a folder pattern such as `/servers-storage/`. Clean and parameterized versions are treated as the same URL. The output is an `.xlsx` workbook with the exact three-sheet audit structure: Summary, Existing URLs in HTML Sitemap, and URLs Not in HTML Sitemap. Only missing 200-status URLs are added to the final sheet; suggested anchor text remains blank.
+## Development progress
+- [x] Internal Link Checker — working
+- [x] HTML Sitemap Audit — working, includes manual fallback for blocked sites
+- [ ] AI-suggested anchor text for missing sitemap URLs — planned, not built yet
+- [ ] Known limitation: heavily bot-protected sites may still need the manual paste method
