@@ -129,7 +129,7 @@ def html_sitemap_gap_checker() -> None:
     collection_method = st.radio(
         "4. Collect rendered sitemap links",
         ["Automatic rendered browser", "Paste links copied from Chrome"],
-        help="Automatic mode runs document.querySelectorAll('a') in Chromium. If Lenovo blocks it, use Chrome paste mode.",
+        help="Automatic mode reads the sitemap directly. Use paste mode if a site blocks it.",
     )
 
     if st.session_state.get("sitemap_collection_method") != collection_method:
