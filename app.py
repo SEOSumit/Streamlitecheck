@@ -8,7 +8,6 @@ from link_checker import output_filename, process_workbook, workbook_sheet_names
 from sitemap_checker import (
     collect_rendered_links_browser,
     create_html_sitemap_audit_from_links,
-    parse_rendered_links_text,
     sitemap_output_filename,
     try_fetch_raw_source,
 )
@@ -126,37 +125,6 @@ def html_sitemap_gap_checker() -> None:
     if scope_mode != "Complete HTML sitemap audit":
         scope_pattern = st.text_input("Folder or URL text", placeholder="/servers-storage/")
 
-    collection_method = st.radio(
-        "4. Collect rendered sitemap links",
-        ["Automatic rendered browser", "Paste links copied from Chrome"],
-        help="Automatic mode reads the sitemap directly. Use paste mode if a site blocks it.",
-    )
-
-    if st.session_state.get("sitemap_collection_method") != collection_method:
-        for key in (
-            "sitemap_collected_links", "sitemap_raw_source", "sitemap_output",
-            "sitemap_existing", "sitemap_missing", "sitemap_stats", "sitemap_filename",
-            "confirm_sitemap_collection",
-        ):
-            st.session_state.pop(key, None)
-        st.session_state["sitemap_collection_method"] = collection_method
-
-    pasted_links = ""
-    if collection_method == "Paste links copied from Chrome":
-        st.markdown(
-            "Open the HTML sitemap in Chrome, press **F12 → Console**, and run this improved command. "
-            "It copies both the rendered URL and its anchor text."
-        )
-        st.code(
-            'copy([...document.querySelectorAll("a")].map(a => `${a.href}\\t${(a.innerText || a.textContent || "").trim().replace(/\\s+/g, " ")}`).join("\\n"));',
-            language="javascript",
-        )
-        pasted_links = st.text_area(
-            "Paste the copied rendered links here",
-            height=240,
-            placeholder="https://www.example.com/page/\tAnchor Text",
-        )
-
     signature = None
     if url_status_file and sitemap_url:
         signature = hashlib.sha256(
@@ -175,12 +143,7 @@ def html_sitemap_gap_checker() -> None:
     ):
         with st.spinner("Collecting links from the rendered sitemap…"):
             try:
-                if collection_method == "Automatic rendered browser":
-                    collected_links = collect_rendered_links_browser(sitemap_url)
-                else:
-                    if not pasted_links.strip():
-                        raise ValueError("Paste the rendered Chrome links before collecting.")
-                    collected_links = parse_rendered_links_text(pasted_links, sitemap_url)
+                collected_links = collect_rendered_links_browser(sitemap_url)
                 raw_source = try_fetch_raw_source(sitemap_url)
             except Exception as exc:
                 st.error(str(exc))
