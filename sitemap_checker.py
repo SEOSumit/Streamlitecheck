@@ -418,7 +418,30 @@ def try_fetch_raw_source(sitemap_url: str) -> str | None:
 
 
 def fetch_rendered_page_text(url: str, timeout: int = 45) -> str:
-    """Load a page in headless Chromium and return its visible text (for AI anchor matching)."""
+    """Load a page and return its visible text (for AI anchor matching)."""
+    # Fast path: urllib
+    try:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+            },
+        )
+        with urlopen(req, timeout=15) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            html_content = response.read(10_000_000).decode(charset, errors="replace")
+            # Strip script and style tags
+            html_content = re.sub(r'<(script|style|noscript).*?>.*?</\1>', ' ', html_content, flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(r'<[^>]+>', ' ', html_content)
+            text = normalize_text(text)
+            if len(text) > 500:
+                return text[:4000]
+    except Exception:
+        pass  # Fallback to Selenium
+
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -620,22 +643,53 @@ def _audit_rows(
             continue
         missing_candidates.append(record)
 
+    import concurrent.futures
     use_ai = bool(queries) and bool(api_key)
     missing = []
-    for i, record in enumerate(missing_candidates, 1):
-        if use_ai:
-            anchor = suggest_anchor_with_ai(str(record["url"]), queries or [], api_key or "")
-        else:
-            anchor = suggest_missing_anchor_for_future_ai(str(record["url"]))
-        missing.append(
-            {
+    
+    if use_ai:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_record = {}
+            for i, record in enumerate(missing_candidates, 1):
+                future = executor.submit(suggest_anchor_with_ai, str(record["url"]), queries or [], api_key or "")
+                future_to_record[future] = record
+            
+            for future in concurrent.futures.as_completed(future_to_record):
+                record = future_to_record[future]
+                try:
+                    anchor = future.result()
+                except Exception:
+                    anchor = ""
+                missing.append(
+                    {
+                        "url": record["url"],
+                        "status": record["status"],
+                        "anchor": anchor,
+                    }
+                )
+                if progress:
+                    progress(len(missing), len(missing_candidates))
+        # Restore original order
+        missing_map = {m["url"]: m["anchor"] for m in missing}
+        missing = []
+        for record in missing_candidates:
+            missing.append({
                 "url": record["url"],
                 "status": record["status"],
-                "anchor": anchor,
-            }
-        )
-        if progress:
-            progress(i, len(missing_candidates))
+                "anchor": missing_map.get(record["url"], "")
+            })
+    else:
+        for i, record in enumerate(missing_candidates, 1):
+            anchor = suggest_missing_anchor_for_future_ai(str(record["url"]))
+            missing.append(
+                {
+                    "url": record["url"],
+                    "status": record["status"],
+                    "anchor": anchor,
+                }
+            )
+            if progress:
+                progress(i, len(missing_candidates))
     return existing, missing
 
 
