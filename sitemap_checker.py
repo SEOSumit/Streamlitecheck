@@ -26,7 +26,7 @@ USER_AGENT = (
     "Chrome/150.0.0.0 Safari/537.36"
 )
 
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+GEMINI_MODEL_NAME = "gemini-1.5-flash"
 
 
 @dataclass
@@ -194,11 +194,21 @@ def _records_from_table(table: DataTable) -> list[dict[str, object]]:
 
 
 def load_url_status_records(data: bytes, filename: str) -> list[dict[str, object]]:
-    candidates = [_records_from_table(table) for table in load_tables(data, filename)]
-    candidates = [records for records in candidates if records]
-    if not candidates:
-        raise ValueError("No URLs found from A2 onward. Column A must contain URLs and column B status codes.")
-    source_records = max(candidates, key=len)
+    tables = load_tables(data, filename)
+    candidates = []
+    
+    # Try to find a sheet named 'Pages' specifically
+    pages_candidates = [_records_from_table(table) for table in tables if "pages" in table.name.casefold()]
+    pages_candidates = [records for records in pages_candidates if records]
+    
+    if pages_candidates:
+        source_records = max(pages_candidates, key=len)
+    else:
+        candidates = [_records_from_table(table) for table in tables]
+        candidates = [records for records in candidates if records]
+        if not candidates:
+            raise ValueError("No URLs found from A2 onward. Column A must contain URLs and column B status codes.")
+        source_records = max(candidates, key=len)
 
     # Treat clean and parameterized versions as the same URL. Prefer a clean URL when both exist.
     chosen: dict[str, dict[str, object]] = {}
@@ -234,7 +244,7 @@ def load_queries_from_workbook(data: bytes, filename: str) -> list[str]:
         return []
     target = None
     for ws in wb.worksheets:
-        if ws.title.strip().casefold() == "query":
+        if ws.title.strip().casefold() in ("query", "queries"):
             target = ws
             break
     if target is None:
@@ -562,16 +572,30 @@ def _audit_rows(
             raw_vanilla_keys = set()
 
     existing = []
+    existing_covered_normalized = set()
+    
     for item in scoped_anchors:
         key = item["normalized"]
         uploaded = uploaded_map.get(key)
         status = uploaded["status"] if uploaded else ""
+        
+        final_url = ""
+        if uploaded:
+            status_group = _status_group(status)
+            if status_group == "3xx" and uploaded.get("final_redirect_url"):
+                final_url = uploaded["final_redirect_url"]
+            else:
+                final_url = item["url"]
+        else:
+            final_url = item["url"]
+
         if raw_vanilla_keys is None:
             in_source, source_type = "", ""
         elif key in raw_vanilla_keys:
             in_source, source_type = "Yes", "Vanilla HTML"
         else:
             in_source, source_type = "No", "JavaScript/Rendered DOM"
+            
         existing.append(
             {
                 "url": item["url"],
@@ -581,13 +605,16 @@ def _audit_rows(
                 "in_source": in_source,
                 "source_type": source_type,
                 "note": "",
-                "suggested_link": "",
+                "final_url": final_url,
             }
         )
+        existing_covered_normalized.add(key)
+        if final_url:
+            existing_covered_normalized.add(normalize_compare_url(final_url))
 
     missing_candidates = []
     for record in scoped_uploaded:
-        if record["normalized"] in sitemap_keys:
+        if record["normalized"] in existing_covered_normalized:
             continue
         if _status_group(record["status"]) != "200":
             continue
@@ -681,7 +708,7 @@ def _build_audit_workbook(
         ensure_styled_row(existing_ws, index, 2, 8)
         values = [
             row["url"], row["anchor"], row["status"], row["in_sitemap"], row["in_source"],
-            row["source_type"], "", "",
+            row["source_type"], "", row["final_url"],
         ]
         for column, value in enumerate(values, 1):
             existing_ws.cell(index, column).value = value

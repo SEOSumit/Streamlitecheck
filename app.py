@@ -109,9 +109,9 @@ def html_sitemap_gap_checker() -> None:
 
     url_status_file = st.file_uploader(
         "1. Upload URL and status-code list",
-        type=["xlsx", "csv", "zip"],
+        type=["xlsx"],
         key="sitemap_complete",
-        help="Row 1 contains headings. Column A: URL, Column B: status code, Column C: final redirect URL.",
+        help="Upload ONE Excel file containing two sheets: 'Pages' (Col A: URL, Col B: Status Code, Col C: Final Redirect URL) and 'Queries' (Col A: Queries).",
     )
     sitemap_url = st.text_input(
         "2. HTML sitemap page URL",
