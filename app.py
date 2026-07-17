@@ -208,13 +208,18 @@ def html_sitemap_gap_checker() -> None:
             "I confirm the collected link count and sample look correct",
             key="confirm_sitemap_collection",
         )
+        generate_ai_anchor = st.checkbox(
+            "Generate AI Anchor Text",
+            key="generate_ai_anchor",
+            value=True,
+        )
         if st.button(
             "Create Excel Audit (.xlsx)",
             type="primary",
             use_container_width=True,
             disabled=not confirmed or not url_status_file or len(links) < 10,
         ):
-            use_ai = bool(queries) and bool(gemini_api_key)
+            use_ai = bool(queries) and bool(gemini_api_key) and generate_ai_anchor
             ai_progress_bar = st.empty()
 
             def _update_ai_progress(done: int, total: int) -> None:
@@ -223,7 +228,8 @@ def html_sitemap_gap_checker() -> None:
                         done / total, text=f"Generating AI anchor suggestions… {done} of {total}"
                     )
 
-            with st.spinner("Matching URLs and building the Excel template…"):
+            spinner_msg = "Hold your horses and grab a coffee! ☕ The AI is brewing some freshly baked anchor texts..." if use_ai else "Matching URLs and building the Excel template…"
+            with st.spinner(spinner_msg):
                 try:
                     output, existing, missing, stats = create_html_sitemap_audit_from_links(
                         url_status_file.getvalue(),
@@ -233,8 +239,8 @@ def html_sitemap_gap_checker() -> None:
                         scope_mode,
                         scope_pattern,
                         st.session_state.get("sitemap_raw_source"),
-                        queries=queries,
-                        api_key=gemini_api_key,
+                        queries=queries if use_ai else None,
+                        api_key=gemini_api_key if use_ai else None,
                         progress=_update_ai_progress if use_ai else None,
                     )
                 except Exception as exc:
