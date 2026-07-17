@@ -26,6 +26,8 @@ USER_AGENT = (
     "Chrome/150.0.0.0 Safari/537.36"
 )
 
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+
 
 @dataclass
 class DataTable:
@@ -222,6 +224,33 @@ def load_url_status_records(data: bytes, filename: str) -> list[dict[str, object
     return [chosen[key] for key in order]
 
 
+def load_queries_from_workbook(data: bytes, filename: str) -> list[str]:
+    """Read the optional 'Query' sheet (A1 heading, queries from A2 down) from the same upload."""
+    if Path(filename).suffix.casefold() != ".xlsx":
+        return []
+    try:
+        wb = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        return []
+    target = None
+    for ws in wb.worksheets:
+        if ws.title.strip().casefold() == "query":
+            target = ws
+            break
+    if target is None:
+        return []
+    queries: list[str] = []
+    seen: set[str] = set()
+    for row in target.iter_rows(min_row=2, values_only=True):
+        if not row or row[0] in (None, ""):
+            continue
+        text = normalize_text(row[0])
+        if text and text.casefold() not in seen:
+            seen.add(text.casefold())
+            queries.append(text)
+    return queries
+
+
 def fetch_sitemap_html(sitemap_url: str, timeout: int = 30) -> tuple[str, str, int]:
     if not sitemap_url.casefold().startswith(("http://", "https://")):
         raise ValueError("Enter a complete HTML sitemap URL beginning with http:// or https://.")
@@ -378,6 +407,93 @@ def try_fetch_raw_source(sitemap_url: str) -> str | None:
         return None
 
 
+def fetch_rendered_page_text(url: str, timeout: int = 45) -> str:
+    """Load a page in headless Chromium and return its visible text (for AI anchor matching)."""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.support.ui import WebDriverWait
+    except ImportError as exc:
+        raise ValueError("Browser automation dependency is not installed.") from exc
+
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(f"--user-agent={USER_AGENT}")
+    if os.path.exists("/usr/bin/chromium"):
+        options.binary_location = "/usr/bin/chromium"
+
+    driver = None
+    try:
+        if os.path.exists("/usr/bin/chromedriver"):
+            driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=options)
+        else:
+            driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(timeout)
+        driver.get(url)
+        WebDriverWait(driver, min(timeout, 25)).until(
+            lambda current: current.execute_script("return document.readyState") == "complete"
+        )
+        text = driver.execute_script(
+            "return (document.body && (document.body.innerText || document.body.textContent)) || '';"
+        )
+    finally:
+        if driver is not None:
+            driver.quit()
+
+    return normalize_text(text)[:4000]
+
+
+def _gemini_pick_anchor(page_text: str, queries: list[str], api_key: str) -> str:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return ""
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+    queries_block = "\n".join(f"- {q}" for q in queries)
+    prompt = (
+        "You are an SEO editor choosing an internal-link anchor text.\n\n"
+        f"Rendered page content:\n\"\"\"\n{page_text}\n\"\"\"\n\n"
+        f"Candidate target queries:\n{queries_block}\n\n"
+        "Pick the single query above that best matches this page's topic and search intent, "
+        "then write ONE natural, concise anchor text (3-8 words) suitable for a hyperlink to this page, "
+        "based on that query and the page content. "
+        "Respond with ONLY the anchor text — no quotes, no explanation, no labels."
+    )
+    for attempt in range(3):
+        try:
+            response = model.generate_content(prompt)
+            text = normalize_text(getattr(response, "text", "") or "")
+            if text:
+                return text.strip("\"'").splitlines()[0].strip()[:120]
+            return ""
+        except Exception:
+            time.sleep(5 * (attempt + 1))
+    return ""
+
+
+def suggest_anchor_with_ai(url: str, queries: list[str], api_key: str) -> str:
+    """Fetch a page's rendered text and ask Gemini for the best matching anchor text."""
+    if not queries or not api_key:
+        return ""
+    try:
+        page_text = fetch_rendered_page_text(url)
+    except Exception:
+        return ""
+    if not page_text:
+        return ""
+    try:
+        return _gemini_pick_anchor(page_text, queries, api_key)
+    except Exception:
+        return ""
+
+
 def _in_scope(url: str, mode: str, pattern: str) -> bool:
     if mode == "Complete HTML sitemap audit":
         return True
@@ -424,6 +540,9 @@ def _audit_rows(
     sitemap_url: str,
     mode: str,
     pattern: str,
+    queries: list[str] | None = None,
+    api_key: str | None = None,
+    progress=None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     scoped_uploaded = [r for r in uploaded_records if _in_scope(str(r["url"]), mode, pattern)]
     scoped_anchors = [r for r in sitemap_anchors if _in_scope(r["url"], mode, pattern)]
@@ -466,19 +585,30 @@ def _audit_rows(
             }
         )
 
-    missing = []
+    missing_candidates = []
     for record in scoped_uploaded:
         if record["normalized"] in sitemap_keys:
             continue
         if _status_group(record["status"]) != "200":
             continue
+        missing_candidates.append(record)
+
+    use_ai = bool(queries) and bool(api_key)
+    missing = []
+    for i, record in enumerate(missing_candidates, 1):
+        if use_ai:
+            anchor = suggest_anchor_with_ai(str(record["url"]), queries or [], api_key or "")
+        else:
+            anchor = suggest_missing_anchor_for_future_ai(str(record["url"]))
         missing.append(
             {
                 "url": record["url"],
                 "status": record["status"],
-                "anchor": suggest_missing_anchor_for_future_ai(str(record["url"])),
+                "anchor": anchor,
             }
         )
+        if progress:
+            progress(i, len(missing_candidates))
     return existing, missing
 
 
@@ -562,7 +692,7 @@ def _build_audit_workbook(
         ensure_styled_row(missing_ws, index, 2, 3)
         missing_ws.cell(index, 1).value = row["url"]
         missing_ws.cell(index, 2).value = row["status"]
-        missing_ws.cell(index, 3).value = ""
+        missing_ws.cell(index, 3).value = row["anchor"]
 
     output = BytesIO()
     wb.save(output)
@@ -576,10 +706,16 @@ def create_html_sitemap_audit(
     sitemap_url: str,
     scope_mode: str,
     scope_pattern: str = "",
+    queries: list[str] | None = None,
+    api_key: str | None = None,
+    progress=None,
 ) -> tuple[bytes, list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
     uploaded = load_url_status_records(url_status_data, url_status_filename)
     anchors = parse_sitemap_anchors(sitemap_source, sitemap_url)
-    existing, missing = _audit_rows(uploaded, anchors, sitemap_source, sitemap_url, scope_mode, scope_pattern)
+    existing, missing = _audit_rows(
+        uploaded, anchors, sitemap_source, sitemap_url, scope_mode, scope_pattern,
+        queries=queries, api_key=api_key, progress=progress,
+    )
     output = _build_audit_workbook(sitemap_url, existing, missing)
     stats = {
         "uploaded_urls": sum(_in_scope(str(r["url"]), scope_mode, scope_pattern) for r in uploaded),
@@ -598,6 +734,9 @@ def create_html_sitemap_audit_from_links(
     scope_mode: str,
     scope_pattern: str = "",
     raw_source: str | None = None,
+    queries: list[str] | None = None,
+    api_key: str | None = None,
+    progress=None,
 ) -> tuple[bytes, list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
     uploaded = load_url_status_records(url_status_data, url_status_filename)
     sitemap_host = (urlsplit(sitemap_url).hostname or "").casefold()
@@ -616,7 +755,8 @@ def create_html_sitemap_audit_from_links(
     if not anchors:
         raise ValueError("No same-domain rendered sitemap links are available for the audit.")
     existing, missing = _audit_rows(
-        uploaded, anchors, raw_source, sitemap_url, scope_mode, scope_pattern
+        uploaded, anchors, raw_source, sitemap_url, scope_mode, scope_pattern,
+        queries=queries, api_key=api_key, progress=progress,
     )
     output = _build_audit_workbook(sitemap_url, existing, missing)
     stats = {

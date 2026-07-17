@@ -8,6 +8,7 @@ from link_checker import output_filename, process_workbook, workbook_sheet_names
 from sitemap_checker import (
     collect_rendered_links_browser,
     create_html_sitemap_audit_from_links,
+    load_queries_from_workbook,
     sitemap_output_filename,
     try_fetch_raw_source,
 )
@@ -125,6 +126,26 @@ def html_sitemap_gap_checker() -> None:
     if scope_mode != "Complete HTML sitemap audit":
         scope_pattern = st.text_input("Folder or URL text", placeholder="/servers-storage/")
 
+    queries: list[str] = []
+    gemini_api_key = None
+    if url_status_file:
+        queries = load_queries_from_workbook(url_status_file.getvalue(), url_status_file.name)
+        try:
+            gemini_api_key = st.secrets["GEMINI_API_KEY"]
+        except Exception:
+            gemini_api_key = None
+        if queries:
+            if gemini_api_key:
+                st.caption(
+                    f"Found {len(queries)} queries in the 'Query' sheet — AI anchor suggestions will run automatically."
+                )
+            else:
+                gemini_api_key = st.text_input(
+                    "Gemini API key (a 'Query' sheet was found — needed for AI anchor suggestions)",
+                    type="password",
+                    key="gemini_api_key_input",
+                )
+
     signature = None
     if url_status_file and sitemap_url:
         signature = hashlib.sha256(
@@ -193,6 +214,15 @@ def html_sitemap_gap_checker() -> None:
             use_container_width=True,
             disabled=not confirmed or not url_status_file or len(links) < 10,
         ):
+            use_ai = bool(queries) and bool(gemini_api_key)
+            ai_progress_bar = st.empty()
+
+            def _update_ai_progress(done: int, total: int) -> None:
+                if total:
+                    ai_progress_bar.progress(
+                        done / total, text=f"Generating AI anchor suggestions… {done} of {total}"
+                    )
+
             with st.spinner("Matching URLs and building the Excel template…"):
                 try:
                     output, existing, missing, stats = create_html_sitemap_audit_from_links(
@@ -203,10 +233,14 @@ def html_sitemap_gap_checker() -> None:
                         scope_mode,
                         scope_pattern,
                         st.session_state.get("sitemap_raw_source"),
+                        queries=queries,
+                        api_key=gemini_api_key,
+                        progress=_update_ai_progress if use_ai else None,
                     )
                 except Exception as exc:
                     st.error(str(exc))
                 else:
+                    ai_progress_bar.empty()
                     st.session_state["sitemap_output"] = output
                     st.session_state["sitemap_existing"] = existing
                     st.session_state["sitemap_missing"] = missing
