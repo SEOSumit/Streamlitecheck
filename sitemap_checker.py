@@ -43,10 +43,29 @@ class SitemapAnchorParser(HTMLParser):
         self._open_anchor: dict[str, object] | None = None
         self._ignored_depth = 0
 
+    def _is_junk_container(self, tag: str, attrs_dict: dict) -> bool:
+        if tag in {"script", "style", "noscript", "header", "footer", "nav"}:
+            return True
+        if tag == "div":
+            for key, value in attrs_dict.items():
+                if key in {"class", "id", "componentname", "fragmentid"}:
+                    val = str(value).casefold()
+                    if "header" in val or "footer" in val or "megamenu" in val or "nav" in val:
+                        return True
+        return False
+
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.casefold()
         attrs_dict = dict(attrs)
-        if tag in {"script", "style", "noscript"}:
+        
+        # Track opening tags in a stack to match with closing tags
+        if not hasattr(self, "_tag_stack"):
+            self._tag_stack = []
+            
+        is_junk = self._is_junk_container(tag, attrs_dict)
+        self._tag_stack.append((tag, is_junk))
+
+        if is_junk:
             self._ignored_depth += 1
             return
         if self._ignored_depth:
@@ -63,7 +82,19 @@ class SitemapAnchorParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
-        if tag in {"script", "style", "noscript"}:
+        
+        # Pop from stack to see if THIS closing tag belongs to a junk container
+        is_junk = False
+        if hasattr(self, "_tag_stack") and self._tag_stack:
+            # We assume valid HTML where end tags match start tags
+            # We pop the last tag. If it doesn't match perfectly, we still pop to keep state semi-clean
+            for i in reversed(range(len(self._tag_stack))):
+                if self._tag_stack[i][0] == tag:
+                    is_junk = self._tag_stack[i][1]
+                    self._tag_stack.pop(i)
+                    break
+        
+        if is_junk:
             self._ignored_depth = max(0, self._ignored_depth - 1)
             return
         if self._ignored_depth:
