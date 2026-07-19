@@ -211,7 +211,6 @@ def html_sitemap_gap_checker() -> None:
                 except Exception as exc:
                     st.error(str(exc))
                 else:
-                    ai_progress_bar.empty()
                     st.session_state["sitemap_output"] = output
                     st.session_state["sitemap_existing"] = existing
                     st.session_state["sitemap_missing"] = missing
