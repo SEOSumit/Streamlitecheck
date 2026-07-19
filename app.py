@@ -104,14 +104,14 @@ def internal_link_checker() -> None:
 def html_sitemap_gap_checker() -> None:
     st.title("HTML Sitemap Audit")
     st.caption(
-        "Upload your mapped Pages and Queries sheets to generate a complete gap-analysis audit that identifies which URLs are missing from the sitemap, which exist already, and exactly where 3xx redirects point."
+        "Upload your mapped Pages sheet to generate a complete gap-analysis audit that identifies which URLs are missing from the sitemap, which exist already, and exactly where 3xx redirects point."
     )
 
     url_status_file = st.file_uploader(
         "1. Upload URL and status-code list",
         type=["xlsx"],
         key="sitemap_complete",
-        help="Upload ONE Excel file containing two sheets: 'Pages' (Col A: URL, Col B: Status Code, Col C: Final Redirect URL) and 'Queries' (Col A: Queries).",
+        help="Upload ONE Excel file containing the sheet: 'Pages' (Col A: URL, Col B: Status Code, Col C: Final Redirect URL).",
     )
     sitemap_url = st.text_input(
         "2. HTML sitemap page URL",
