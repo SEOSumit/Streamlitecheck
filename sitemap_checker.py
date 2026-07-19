@@ -417,114 +417,7 @@ def try_fetch_raw_source(sitemap_url: str) -> str | None:
         return None
 
 
-def fetch_rendered_page_text(url: str, timeout: int = 45) -> str:
-    """Load a page and return its visible text (for AI anchor matching)."""
-    # Fast path: urllib
-    try:
-        req = Request(
-            url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Cache-Control": "no-cache",
-            },
-        )
-        with urlopen(req, timeout=15) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            html_content = response.read(10_000_000).decode(charset, errors="replace")
-            # Strip script and style tags
-            html_content = re.sub(r'<(script|style|noscript).*?>.*?</\1>', ' ', html_content, flags=re.IGNORECASE | re.DOTALL)
-            text = re.sub(r'<[^>]+>', ' ', html_content)
-            text = normalize_text(text)
-            if len(text) > 500:
-                return text[:4000]
-    except Exception:
-        pass  # Fallback to Selenium
 
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.support.ui import WebDriverWait
-    except ImportError as exc:
-        raise ValueError("Browser automation dependency is not installed.") from exc
-
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument(f"--user-agent={USER_AGENT}")
-    if os.path.exists("/usr/bin/chromium"):
-        options.binary_location = "/usr/bin/chromium"
-
-    driver = None
-    try:
-        if os.path.exists("/usr/bin/chromedriver"):
-            driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=options)
-        else:
-            driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(timeout)
-        driver.get(url)
-        WebDriverWait(driver, min(timeout, 25)).until(
-            lambda current: current.execute_script("return document.readyState") == "complete"
-        )
-        text = driver.execute_script(
-            "return (document.body && (document.body.innerText || document.body.textContent)) || '';"
-        )
-    finally:
-        if driver is not None:
-            driver.quit()
-
-    return normalize_text(text)[:4000]
-
-
-def _gemini_pick_anchor(page_text: str, queries: list[str], api_key: str) -> str:
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        return ""
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-    queries_block = "\n".join(f"- {q}" for q in queries)
-    prompt = (
-        "You are an SEO editor choosing an internal-link anchor text.\n\n"
-        f"Rendered page content:\n\"\"\"\n{page_text}\n\"\"\"\n\n"
-        f"Candidate target queries:\n{queries_block}\n\n"
-        "Pick the single query above that best matches this page's topic and search intent, "
-        "then write ONE natural, concise anchor text (3-8 words) suitable for a hyperlink to this page, "
-        "based on that query and the page content. "
-        "Respond with ONLY the anchor text — no quotes, no explanation, no labels."
-    )
-    for attempt in range(3):
-        try:
-            response = model.generate_content(prompt)
-            text = normalize_text(getattr(response, "text", "") or "")
-            if text:
-                return text.strip("\"'").splitlines()[0].strip()[:120]
-            return ""
-        except Exception:
-            time.sleep(5 * (attempt + 1))
-    return ""
-
-
-def suggest_anchor_with_ai(url: str, queries: list[str], api_key: str) -> str:
-    """Fetch a page's rendered text and ask Gemini for the best matching anchor text."""
-    if not queries or not api_key:
-        return ""
-    try:
-        page_text = fetch_rendered_page_text(url)
-    except Exception:
-        return ""
-    if not page_text:
-        return ""
-    try:
-        return _gemini_pick_anchor(page_text, queries, api_key)
-    except Exception:
-        return ""
 
 
 def _in_scope(url: str, mode: str, pattern: str) -> bool:
@@ -643,53 +536,17 @@ def _audit_rows(
             continue
         missing_candidates.append(record)
 
-    import concurrent.futures
-    use_ai = bool(queries) and bool(api_key)
     missing = []
-    
-    if use_ai:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_record = {}
-            for i, record in enumerate(missing_candidates, 1):
-                future = executor.submit(suggest_anchor_with_ai, str(record["url"]), queries or [], api_key or "")
-                future_to_record[future] = record
-            
-            for future in concurrent.futures.as_completed(future_to_record):
-                record = future_to_record[future]
-                try:
-                    anchor = future.result()
-                except Exception:
-                    anchor = ""
-                missing.append(
-                    {
-                        "url": record["url"],
-                        "status": record["status"],
-                        "anchor": anchor,
-                    }
-                )
-                if progress:
-                    progress(len(missing), len(missing_candidates))
-        # Restore original order
-        missing_map = {m["url"]: m["anchor"] for m in missing}
-        missing = []
-        for record in missing_candidates:
-            missing.append({
+    for i, record in enumerate(missing_candidates, 1):
+        missing.append(
+            {
                 "url": record["url"],
                 "status": record["status"],
-                "anchor": missing_map.get(record["url"], "")
-            })
-    else:
-        for i, record in enumerate(missing_candidates, 1):
-            anchor = suggest_missing_anchor_for_future_ai(str(record["url"]))
-            missing.append(
-                {
-                    "url": record["url"],
-                    "status": record["status"],
-                    "anchor": anchor,
-                }
-            )
-            if progress:
-                progress(i, len(missing_candidates))
+                "anchor": "",
+            }
+        )
+        if progress:
+            progress(i, len(missing_candidates))
     return existing, missing
 
 
