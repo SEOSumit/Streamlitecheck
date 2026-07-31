@@ -12,13 +12,19 @@ from sitemap_checker import (
     sitemap_output_filename,
     try_fetch_raw_source,
 )
+from xml_sitemap import (
+    fetch_xml_sitemap_urls,
+    filter_sitemap_urls,
+    generate_xml_export_workbook,
+    xml_sitemap_output_filename,
+)
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
 st.sidebar.title("SEO Toolkit")
 selected_tool = st.sidebar.radio(
     "Select a tool",
-    ["Internal Link Checker", "HTML Sitemap Audit"],
+    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export"],
 )
 
 
@@ -235,7 +241,85 @@ def html_sitemap_gap_checker() -> None:
         st.success("Excel workbook ready with Summary, Existing URLs, and URLs Not in HTML Sitemap sheets.")
 
 
+def xml_sitemap_export_tool() -> None:
+    st.title("XML Sitemap Export")
+    st.caption(
+        "Fetch an XML sitemap (or sitemap index), extract all page URLs, optionally filter by path or country/language, and export the result to an Excel template."
+    )
+
+    sitemap_url = st.text_input("1. XML sitemap URL", placeholder="http://example.com/sitemap.xml")
+    path_filter = st.text_input("2. URL path filter (optional)", placeholder="/servers-storage/")
+    country_filter = st.text_input("3. Country/language filter (optional)", placeholder="/us/en/")
+
+    signature = None
+    if sitemap_url:
+        signature = hashlib.sha256(
+            (sitemap_url.strip() + path_filter.strip() + country_filter.strip()).encode("utf-8")
+        ).hexdigest()
+        
+        if st.session_state.get("xml_input_signature") != signature:
+            for key in (
+                "xml_collected_urls", "xml_filtered_urls", "xml_output", "xml_filename", "xml_total_count"
+            ):
+                st.session_state.pop(key, None)
+            st.session_state["xml_input_signature"] = signature
+
+    if sitemap_url and st.button("Fetch & Preview URLs", type="primary", use_container_width=True):
+        with st.spinner("Fetching and parsing XML sitemap…"):
+            try:
+                urls = fetch_xml_sitemap_urls(sitemap_url.strip())
+                filtered_urls = filter_sitemap_urls(urls, path_filter, country_filter)
+            except Exception as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["xml_total_count"] = len(urls)
+                st.session_state["xml_filtered_urls"] = filtered_urls
+                for key in ("xml_output", "xml_filename"):
+                    st.session_state.pop(key, None)
+
+    if st.session_state.get("xml_filtered_urls") is not None:
+        filtered_urls = st.session_state["xml_filtered_urls"]
+        total_count = st.session_state.get("xml_total_count", 0)
+        
+        c1, c2 = st.columns(2)
+        c1.metric("Total URLs in sitemap", total_count)
+        c2.metric("URLs matching filters", len(filtered_urls))
+        
+        if len(filtered_urls) == 0:
+            st.info("0 URLs matched your filters.")
+        else:
+            st.markdown("**Preview (first 20 URLs)**")
+            st.dataframe(
+                [{"URL": u} for u in filtered_urls[:20]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            
+            if st.button("Create Excel Export (.xlsx)", type="primary", use_container_width=True):
+                with st.spinner("Building the Excel template…"):
+                    try:
+                        output = generate_xml_export_workbook(filtered_urls)
+                    except Exception as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state["xml_output"] = output
+                        st.session_state["xml_filename"] = xml_sitemap_output_filename(sitemap_url.strip())
+                        
+    if st.session_state.get("xml_output"):
+        st.download_button(
+            "Download Excel Export (.xlsx)",
+            data=st.session_state["xml_output"],
+            file_name=st.session_state["xml_filename"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+        st.success("Excel workbook ready with your exported URLs.")
+
+
 if selected_tool == "Internal Link Checker":
     internal_link_checker()
-else:
+elif selected_tool == "HTML Sitemap Audit":
     html_sitemap_gap_checker()
+else:
+    xml_sitemap_export_tool()
