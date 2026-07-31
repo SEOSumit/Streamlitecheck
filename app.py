@@ -289,6 +289,16 @@ def xml_sitemap_export_tool() -> None:
             st.info("0 URLs matched your filters.")
         else:
             st.markdown("**Preview (first 20 URLs)**")
+            st.markdown(
+                """
+                <style>
+                [data-testid="stElementToolbar"] {
+                    display: none;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
             st.dataframe(
                 [{"URL": u} for u in filtered_urls[:20]],
                 use_container_width=True,

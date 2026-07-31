@@ -1,4 +1,5 @@
 import gzip
+import re
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
@@ -104,10 +105,104 @@ def filter_sitemap_urls(urls: list[str], path_filter: str, country_filter: str) 
             
     return filtered
 
+def classify_url(url: str) -> str:
+    path = urlsplit(url).path.lower()
+    
+    if path == "" or path == "/":
+        return "Homepage"
+        
+    if any(s in path for s in ["/product/", "/products/", "/p/", "/item/", "/shop/", "/hardware/", "/server/", "/servers/", "/storage/", "/thinksystem/", "/thinkagile/", "/thinkedge/"]):
+        return "Product Pages"
+        
+    if any(s in path for s in ["/service/", "/services/", "/support/", "/consulting/", "/managed-services/"]):
+        return "Service Pages"
+        
+    if any(s in path for s in ["/software/", "/saas/", "/platform/", "/application/"]):
+        return "Software / SaaS"
+        
+    if any(s in path for s in ["/features/", "/feature/"]):
+        return "Feature Pages"
+        
+    if any(s in path for s in ["/solution/", "/solutions/"]):
+        return "Solution Pages"
+        
+    if any(s in path for s in ["/industry/", "/industries/"]):
+        return "Industry Pages"
+        
+    if any(s in path for s in ["/campaign/", "/promo/", "/lp/", "/landing/"]):
+        return "Landing / Campaign Pages"
+        
+    if any(s in path for s in ["/category/", "/categories/", "/c/"]):
+        return "Category / Listing Pages"
+        
+    if any(s in path for s in ["/pricing/", "/price/", "/plans/", "/plan/"]):
+        return "Pricing / Plans"
+        
+    if any(s in path for s in ["/course/", "/courses/", "/program/", "/academy/", "/training/"]):
+        return "Course / Program Pages"
+        
+    if any(s in path for s in ["/location/", "/locations/", "/country/", "/city/"]) or re.search(r"/[a-z]{2}/[a-z]{2}/", path):
+        return "Location Pages"
+        
+    if any(s in path for s in ["/about/", "/company/"]):
+        return "About / Company"
+        
+    if any(s in path for s in ["/team/", "/leadership/", "/management/"]):
+        return "Team / Leadership"
+        
+    if "/contact/" in path:
+        return "Contact"
+        
+    if any(s in path for s in ["/blog/", "/news/", "/article/"]):
+        return "Blog"
+        
+    if any(s in path for s in ["/docs/", "/documentation/", "/manual/"]):
+        return "Documentation"
+        
+    if any(s in path for s in ["/faq/", "/faqs/", "/help/"]):
+        return "FAQ"
+        
+    if any(s in path for s in ["/privacy/", "/terms/", "/cookies/", "/legal/"]):
+        return "Legal"
+        
+    if any(s in path for s in ["/career/", "/careers/", "/jobs/"]):
+        return "Careers"
+        
+    if any(s in path for s in ["/event/", "/events/", "/webinar/"]):
+        return "Events"
+        
+    if any(s in path for s in ["/case-study/", "/case-studies/", "/customer-story/"]):
+        return "Case Studies"
+        
+    if any(s in path for s in ["/download/", "/downloads/", "/resources/"]):
+        return "Downloads"
+        
+    if any(s in path for s in ["/login/", "/signin/", "/portal/", "/dashboard/"]):
+        return "Login / Portal"
+        
+    if "/search/" in path:
+        return "Search"
+        
+    if any(s in path for s in ["/media/", "/press/"]):
+        return "Media"
+        
+    if any(s in path for s in ["/community/", "/forum/"]):
+        return "Community"
+        
+    if any(s in path for s in ["/api/", "/developer/"]):
+        return "API"
+        
+    return "Other"
+
 def generate_xml_export_workbook(urls: list[str]) -> bytes:
     template_path = Path(__file__).with_name("XML_Sitemap_Export.xlsx")
     if not template_path.exists():
         raise ValueError("XML sitemap Excel template (XML_Sitemap_Export.xlsx) is missing from the deployed app.")
+        
+    category_counts = {}
+    for url in urls:
+        cat = classify_url(url)
+        category_counts[cat] = category_counts.get(cat, 0) + 1
         
     wb = load_workbook(template_path)
     pages_ws = wb["Pages"]
@@ -119,6 +214,26 @@ def generate_xml_export_workbook(urls: list[str]) -> bytes:
 
     for idx, url in enumerate(urls, start=2):
         pages_ws.cell(row=idx, column=1).value = url
+        
+    if "Summary" in wb.sheetnames:
+        summary_ws = wb["Summary"]
+        
+        valid_categories = {
+            "Homepage", "Product Pages", "Service Pages", "Software / SaaS", "Feature Pages",
+            "Solution Pages", "Industry Pages", "Landing / Campaign Pages", "Category / Listing Pages",
+            "Pricing / Plans", "Course / Program Pages", "Location Pages", "About / Company",
+            "Team / Leadership", "Contact", "Blog", "Documentation", "FAQ", "Legal", "Careers",
+            "Events", "Case Studies", "Downloads", "Login / Portal", "Search", "Media", "Community",
+            "API", "Other"
+        }
+        
+        for row in summary_ws.iter_rows(min_col=1, max_col=2, max_row=summary_ws.max_row):
+            cat_cell = row[0]
+            if cat_cell.value:
+                cat_name = str(cat_cell.value).strip()
+                if cat_name in valid_categories:
+                    count_cell = row[1]
+                    count_cell.value = category_counts.get(cat_name, 0)
         
     output = BytesIO()
     wb.save(output)
