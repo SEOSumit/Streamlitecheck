@@ -18,13 +18,14 @@ from xml_sitemap import (
     generate_xml_export_workbook,
     xml_sitemap_output_filename,
 )
+from internal_extractor import extract_internal_links_tool
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
 st.sidebar.title("SEO Toolkit")
 selected_tool = st.sidebar.radio(
     "Select a tool",
-    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export"],
+    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export", "Internal Link & Anchor Extractor"],
 )
 
 
@@ -331,5 +332,7 @@ if selected_tool == "Internal Link Checker":
     internal_link_checker()
 elif selected_tool == "HTML Sitemap Audit":
     html_sitemap_gap_checker()
-else:
+elif selected_tool == "XML Sitemap Export":
     xml_sitemap_export_tool()
+elif selected_tool == "Internal Link & Anchor Extractor":
+    extract_internal_links_tool()
