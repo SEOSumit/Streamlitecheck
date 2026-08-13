@@ -19,13 +19,14 @@ from xml_sitemap import (
     xml_sitemap_output_filename,
 )
 from internal_extractor import extract_internal_links_tool
+from body_text_extractor import bulk_body_text_extractor_tool
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
 st.sidebar.title("SEO Toolkit")
 selected_tool = st.sidebar.radio(
     "Select a tool",
-    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export", "Internal Link & Anchor Extractor"],
+    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export", "Internal Link & Anchor Extractor", "Bulk Body Text Extractor"],
 )
 
 
@@ -336,3 +337,5 @@ elif selected_tool == "XML Sitemap Export":
     xml_sitemap_export_tool()
 elif selected_tool == "Internal Link & Anchor Extractor":
     extract_internal_links_tool()
+elif selected_tool == "Bulk Body Text Extractor":
+    bulk_body_text_extractor_tool()
