@@ -67,13 +67,14 @@ def process_body_text_extractor(workbook_bytes, progress_callback):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
-        page = context.new_page()
 
         for idx, item in enumerate(urls_to_process):
             url = item["url"]
             row_idx = item["row"]
             
+            page = None
             try:
+                page = context.new_page()
                 page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 page.wait_for_timeout(2000) # 2s fixed wait
                 
@@ -95,6 +96,13 @@ def process_body_text_extractor(workbook_bytes, progress_callback):
                 error_msg = f"ERROR: {str(e).splitlines()[0]}"
                 sheet.cell(row=row_idx, column=3, value=error_msg)
                 error_count += 1
+            finally:
+                if page:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
             
             # Delay between requests
             time.sleep(0.5)
@@ -132,6 +140,16 @@ def bulk_body_text_extractor_tool() -> None:
     uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], key="body_text_file")
     
     if uploaded:
+        st.markdown(
+            """
+            <style>
+            [data-testid="stFileUploadDropzone"] {
+                display: none;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         workbook_bytes = uploaded.getvalue()
         upload_signature = hashlib.sha256(workbook_bytes).hexdigest()
         
