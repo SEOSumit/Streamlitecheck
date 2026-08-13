@@ -4,6 +4,8 @@ import time
 import subprocess
 import streamlit as st
 import openpyxl
+import concurrent.futures
+import queue
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 def ensure_playwright_installed():
@@ -24,7 +26,53 @@ def ensure_playwright_installed():
         else:
             raise e
 
-def process_body_text_extractor(workbook_bytes, progress_callback):
+def _process_chunk(chunk, progress_queue):
+    """
+    Processes a chunk of URLs in a single Playwright browser context.
+    Yields progress back to the main thread via progress_queue.
+    """
+    results = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+
+        for item in chunk:
+            url = item["url"]
+            row_idx = item["row"]
+            
+            page = None
+            try:
+                page = context.new_page()
+                page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                page.wait_for_timeout(2000) # 2s fixed wait
+                
+                # Extract innerText
+                inner_text = page.evaluate("document.body.innerText")
+                
+                if inner_text:
+                    cleaned_text = " ".join(inner_text.split())
+                    results.append({"row": row_idx, "url": url, "text": cleaned_text, "error": None})
+                else:
+                    results.append({"row": row_idx, "url": url, "text": None, "error": "ERROR: No body text found"})
+                    
+            except Exception as e:
+                error_msg = f"ERROR: {str(e).splitlines()[0]}"
+                results.append({"row": row_idx, "url": url, "text": None, "error": error_msg})
+            finally:
+                if page:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+            
+            # Delay between requests
+            time.sleep(0.5)
+            progress_queue.put(1)
+            
+        browser.close()
+    return results
+
+def process_body_text_extractor(workbook_bytes, progress_callback, max_workers):
     """
     Processes the uploaded workbook, extracts body text from URLs,
     and returns (output_excel_bytes, markdown_text, stats).
@@ -56,59 +104,55 @@ def process_body_text_extractor(workbook_bytes, progress_callback):
     
     total_urls = len(urls_to_process)
     if total_urls == 0:
-        raise ValueError("No URLs found in Column A.")
+        raise ValueError("No URLs found in Column A matching status code 200.")
+
+    ensure_playwright_installed()
+
+    # Split into chunks of 50 to prevent browser memory leaks on very large lists
+    chunk_size = 50
+    chunks = [urls_to_process[i:i + chunk_size] for i in range(0, total_urls, chunk_size)]
+    
+    all_results = []
+    progress_queue = queue.Queue()
+    done_count = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_process_chunk, chunk, progress_queue) for chunk in chunks]
+        
+        while done_count < total_urls:
+            try:
+                # Wait for a progress tick from any thread
+                progress_queue.get(timeout=1.0)
+                done_count += 1
+                progress_callback(done_count, total_urls)
+            except queue.Empty:
+                # If queue is empty for a while, check if all futures are done (e.g. they crashed)
+                if all(f.done() for f in futures):
+                    break
+        
+        for f in futures:
+            try:
+                all_results.extend(f.result())
+            except Exception as e:
+                # Fallback if a whole chunk fails completely
+                pass
 
     markdown_lines = []
     success_count = 0
     error_count = 0
     
-    ensure_playwright_installed()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-
-        for idx, item in enumerate(urls_to_process):
-            url = item["url"]
-            row_idx = item["row"]
-            
-            page = None
-            try:
-                page = context.new_page()
-                page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                page.wait_for_timeout(2000) # 2s fixed wait
-                
-                # Extract innerText
-                inner_text = page.evaluate("document.body.innerText")
-                
-                if inner_text:
-                    # Clean up whitespace
-                    cleaned_text = " ".join(inner_text.split())
-                    sheet.cell(row=row_idx, column=3, value=cleaned_text)
-                    
-                    markdown_lines.append(f"## {url}\n\n{cleaned_text}\n\n---")
-                    success_count += 1
-                else:
-                    sheet.cell(row=row_idx, column=3, value="ERROR: No body text found")
-                    error_count += 1
-                    
-            except Exception as e:
-                error_msg = f"ERROR: {str(e).splitlines()[0]}"
-                sheet.cell(row=row_idx, column=3, value=error_msg)
-                error_count += 1
-            finally:
-                if page:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-
-            
-            # Delay between requests
-            time.sleep(0.5)
-            progress_callback(idx + 1, total_urls)
-            
-        browser.close()
+    # Write results back to the workbook
+    for res in all_results:
+        row_idx = res["row"]
+        url = res["url"]
+        
+        if res["text"]:
+            sheet.cell(row=row_idx, column=3, value=res["text"])
+            markdown_lines.append(f"## {url}\n\n{res['text']}\n\n---")
+            success_count += 1
+        else:
+            sheet.cell(row=row_idx, column=3, value=res["error"])
+            error_count += 1
 
     # Save to bytes
     output_io = io.BytesIO()
@@ -137,6 +181,8 @@ def bulk_body_text_extractor_tool() -> None:
             "- **Column C (Row 1):** `Body Content` (to be filled by this tool)"
         )
         
+    workers = st.slider("Max Concurrent Browsers", 1, 5, 3, help="Higher is faster but uses more memory. Reduce to 1 or 2 if the app crashes on large files.")
+    
     uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], key="body_text_file")
     
     if uploaded:
@@ -167,7 +213,7 @@ def bulk_body_text_extractor_tool() -> None:
 
             with st.spinner("Extracting body text. This may take a while depending on the number of URLs..."):
                 try:
-                    output_xlsx, output_md, stats = process_body_text_extractor(workbook_bytes, update_progress)
+                    output_xlsx, output_md, stats = process_body_text_extractor(workbook_bytes, update_progress, max_workers=workers)
                 except Exception as exc:
                     progress_bar.empty()
                     st.error(str(exc))
