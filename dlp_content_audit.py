@@ -10,6 +10,19 @@ from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 JS_EXTRACT_SCRIPT = r"""
 () => {
+    function isVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && 
+               style.visibility !== 'hidden' && 
+               style.opacity !== '0' && 
+               rect.width > 0 && 
+               rect.height > 0 && 
+               el.getAttribute('aria-hidden') !== 'true' &&
+               el.offsetParent !== null;
+    }
+
     const data = {
         page_heading: "",
         product_region_found: false,
@@ -28,48 +41,50 @@ JS_EXTRACT_SCRIPT = r"""
         sample_qa: [],
         qa_detection_method: "",
         component_sequence: [],
-        audit_notes: []
+        audit_notes: [],
+        debug_candidates: []
     };
 
-    const h1 = document.querySelector('h1');
-    if (h1) data.page_heading = h1.innerText.trim();
-
-    // 1. Footer boundary
-    let footerTop = document.body.scrollHeight;
-    const footerSelectors = ['footer', '[role="contentinfo"]', '[componentname="commonFooter"]', '[componentName="commonFooter"]', '.commonFooter', '#footer'];
-    for (const sel of footerSelectors) {
-        const footers = document.querySelectorAll(sel);
-        if (footers.length > 0) {
-            const f = footers[footers.length - 1];
-            const rect = f.getBoundingClientRect();
-            if (rect.top + window.scrollY > 0) {
-                footerTop = rect.top + window.scrollY;
-                data.component_sequence.push("footer(" + sel + ")");
-                break;
-            }
-        }
-    }
-
-    // 2. Products
-    const lenovoDlp = document.querySelector('[componentname="ofp-2c-mobile-new-dlp"], [componentName="ofp-2c-mobile-new-dlp"]');
-    let productRoot = lenovoDlp;
-    if (productRoot) {
-        data.product_region_found = true;
-        data.product_detection_method = "Site-specific selector";
-        data.component_sequence.push("ofp-2c-mobile-new-dlp");
+    // 1. Page Heading
+    const h1s = Array.from(document.querySelectorAll('h1')).filter(isVisible);
+    if (h1s.length > 0) {
+        data.page_heading = h1s[0].innerText.trim();
+    } else if (document.title) {
+        data.page_heading = document.title;
     } else {
-        const genericRoot = document.querySelector('.product-list, .product-grid, [data-component="product-list"], #products');
-        if (genericRoot) {
-            data.product_region_found = true;
-            productRoot = genericRoot;
-            data.product_detection_method = "Generic structural detection";
-            data.component_sequence.push("generic-product-region");
-        } else {
-            productRoot = document.body; // Fallback to body for card scanning
-        }
+        const metaTitle = document.querySelector('meta[name="title"]');
+        if (metaTitle) data.page_heading = metaTitle.content;
     }
 
-    // Reported count
+    // Identify Main Region
+    let mainRegion = document.querySelector('main, [role="main"], #main-content');
+    if (!mainRegion) mainRegion = document.body;
+
+    // Footer Boundary
+    const footerEls = Array.from(document.querySelectorAll('footer, [role="contentinfo"], [componentname="commonFooter" i], [componentName="commonFooter" i], .commonFooter'));
+    let footerTop = document.body.scrollHeight;
+    let footerMethod = "none";
+    if (footerEls.length > 0) {
+        const footer = footerEls[footerEls.length - 1];
+        footerTop = footer.getBoundingClientRect().top + window.scrollY;
+        footerMethod = footer.tagName.toLowerCase() + (footer.getAttribute('componentname') ? '[componentname]' : '');
+    }
+    data.audit_notes.push(`Footer detected via: ${footerMethod} at vertical pos: ${footerTop}`);
+
+    // 2. Product Region
+    let productRoot = mainRegion;
+    const lenovoDlp = mainRegion.querySelector('[componentname="ofp-2c-mobile-new-dlp" i]');
+    if (lenovoDlp && isVisible(lenovoDlp)) {
+        data.product_region_found = true;
+        productRoot = lenovoDlp;
+        data.product_detection_method = "Site-specific selector";
+        
+        // Lenovo often puts count in a specific element
+        const countEl = lenovoDlp.querySelector('.number-count, .product-count, [data-count]');
+        if (countEl) {
+            const num = parseInt(countEl.innerText.replace(/[^0-9]/g, ''));
+            if (!isNaN(num)) data.reported_product_count = num;
+        } else {
             data.reported_product_count = 1; // Assuming exists if region exists
         }
     } else {
@@ -96,26 +111,29 @@ JS_EXTRACT_SCRIPT = r"""
         // 2. Structural discovery if 0
         if (cards.length === 0) {
             const links = Array.from(productRoot.querySelectorAll('a[href]')).filter(isVisible);
-            const parentMap = new Map();
+            const candidates = [];
             links.forEach(a => {
                 let p = a.parentElement;
                 while (p && p !== productRoot && p.tagName !== 'BODY') {
                     if (p.querySelector('img') && p.innerText.match(/[0-9]/) && !p.className.includes('skeleton')) {
-                        parentMap.set(p, (parentMap.get(p) || 0) + 1);
+                        candidates.push(p);
+                        break;
                     }
                     p = p.parentElement;
                 }
             });
-            let bestRoot = null;
-            let maxCount = 0;
-            for (let [p, count] of parentMap.entries()) {
-                if (count > maxCount && count > 1) {
-                    maxCount = count;
-                    bestRoot = p;
-                }
+            const classCounts = new Map();
+            candidates.forEach(c => {
+                const key = c.tagName + "|" + c.className;
+                classCounts.set(key, (classCounts.get(key) || 0) + 1);
+            });
+            let bestClass = null;
+            let maxC = 0;
+            for (let [k, v] of classCounts.entries()) {
+                if (v > maxC) { maxC = v; bestClass = k; }
             }
-            if (bestRoot) {
-                cards = Array.from(bestRoot.children).filter(isVisible).filter(c => !c.className.includes('skeleton') && c.querySelector('a'));
+            if (bestClass) {
+                cards = Array.from(new Set(candidates.filter(c => (c.tagName + "|" + c.className) === bestClass)));
                 data.product_detection_method = "Structural repeated containers";
             }
         }
@@ -124,15 +142,18 @@ JS_EXTRACT_SCRIPT = r"""
     // Deduplicate cards
     let seenCards = new Set();
     cards.forEach(c => {
-        const link = c.querySelector('a');
-        const title = link ? link.innerText.trim() : c.innerText.trim().split('\n')[0];
+        const linkList = Array.from(c.querySelectorAll('a[href]'));
+        let link = linkList.find(l => l.innerText.trim().length > 5 && !l.href.includes('javascript:'));
+        if (!link) link = linkList[0];
+        
+        const title = link && link.innerText.trim() ? link.innerText.trim().replace(/\n/g, ' ') : c.innerText.trim().split('\n').find(l => l.trim().length > 0) || "";
         const url = (link && link.href) ? link.href : title;
         const key = url || title;
         if (key && !seenCards.has(key)) {
             seenCards.add(key);
             data.rendered_product_cards++;
             if (data.sample_products.length < 3) {
-                data.sample_products.push(title.substring(0, 50).replace(/\n/g, ' '));
+                data.sample_products.push(String(title).substring(0, 50));
             }
         }
     });
@@ -210,26 +231,56 @@ JS_EXTRACT_SCRIPT = r"""
         const text = c.innerText.trim();
         const charCount = text.length;
         
-                data.component_sequence.push(`BOPC(lenovo-adapter)`);
-            } else {
-                data.bopc_detection_method = "Generic structural long-form block";
-                data.component_sequence.push("BOPC(generic)");
+        data.component_sequence.push(`${c.tagName.toLowerCase()}(${String(compName).substring(0,25)})[${charCount} chars]`);
+
+        // BOPC Candidates
+        if (top >= productBottom && bottom <= footerTop + 100 && !isFaq && !isProduct) {
+            if (c.tagName === 'NAV' || c.tagName === 'HEADER' || c.tagName === 'FOOTER') return;
+
+            const headings = Array.from(c.querySelectorAll('h1, h2, h3, h4, h5')).filter(isVisible).map(h => h.innerText.trim()).filter(h => h.length > 0);
+            const paragraphs = Array.from(c.querySelectorAll('p')).filter(isVisible);
+            
+            const debugObj = {
+                "DOM Order": index,
+                "Component Name": compName,
+                "Tag": c.tagName,
+                "Text Characters": charCount,
+                "Heading Count": headings.length,
+                "Paragraph Count": paragraphs.length,
+                "Contains FAQ": !!isFaq,
+                "Contains Products": !!isProduct,
+                "Vertical Pos": `${Math.round(top)} - ${Math.round(bottom)}`,
+                "BOPC Yes/No": "No"
+            };
+
+            if (!bopcFound && charCount > 300 && headings.length >= 1 && paragraphs.length >= 2) {
+                bopcFound = true;
+                debugObj["BOPC Yes/No"] = "Yes";
+                data.bopc_available = true;
+                data.bopc_char_count = charCount;
+                data.bopc_heading_count = headings.length;
+                data.bopc_headings = headings.slice(0, 3);
+                
+                const isLenovoBOPC = (typeof compName === 'string' && (compName.includes('ofp-Bottom-Content') || compName.includes('htmlUpload')));
+                data.bopc_detection_method = isLenovoBOPC ? "Site-specific long-form block" : "Generic structural long-form block";
+                data.component_sequence[data.component_sequence.length - 1] += " -> BOPC!";
+            } else if (!bopcFound) {
+                debugObj["Excluded Reason"] = "Thresholds not met (chars>300, headings>=1, paragraphs>=2)";
             }
-            break;
-        } else if (charCount > 0 && typeof compName === 'string') {
-           data.component_sequence.push(`Block(${compName.substring(0, 15)})`);
+            data.debug_candidates.push(debugObj);
         }
-    }
+    });
 
     return data;
 }
 """
 
 def assign_page_status(data):
-    if data["http_status"] == "Error":
+    if data.get("http_status", "") == "Error":
         return "Manual Review"
     
     notes = " ".join(data["audit_notes"])
+    
     if "Explicit zero-product" in notes or (data["reported_product_count"] == 0 and data["rendered_product_cards"] == 0 and data["product_region_found"]):
         return "Missing Products"
         
@@ -294,38 +345,69 @@ def process_single_url(url: str) -> dict:
                 result["HTTP Status"] = f"{response.status} {response.status_text}"
             result["Final URL"] = page.url
             
-            page.wait_for_timeout(2000)
-            
-            # Incremental scroll
-            prev_height = 0
-            stable_checks = 0
-            for _ in range(25):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(600)
-                height = page.evaluate("document.body.scrollHeight")
-                if height == prev_height:
-                    stable_checks += 1
-                    if stable_checks >= 3:
-                        break
-                else:
-                    stable_checks = 0
-                prev_height = height
-                
-            page.wait_for_timeout(1000)
+            # Fast scroll till bottom or stable
+            page.evaluate('''
+                () => new Promise(resolve => {
+                    let stableChecks = 0;
+                    let prevHeight = 0;
+                    let attempts = 0;
+                    const interval = setInterval(() => {
+                        window.scrollBy(0, 800);
+                        const h = document.body.scrollHeight;
+                        const skeletons = Array.from(document.querySelectorAll('.skeleton, .skeleton_product_card, .pc_dlp_skeleton_box'));
+                        const skeletonVisible = skeletons.some(el => {
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                        });
+                        if (h === prevHeight && !skeletonVisible) {
+                            stableChecks++;
+                            if (stableChecks >= 3) {
+                                clearInterval(interval);
+                                resolve();
+                            }
+                        } else {
+                            stableChecks = 0;
+                        }
+                        prevHeight = h;
+                        attempts++;
+                        if (attempts >= 40) { // max ~10s
+                            clearInterval(interval);
+                            resolve();
+                        }
+                    }, 250);
+                })
+            ''')
             
             data = page.evaluate(JS_EXTRACT_SCRIPT)
             
-            # Retry logic
-            if data["product_region_found"] and data["rendered_product_cards"] == 0:
+            # Retry logic: DO NOT erase first result if reload fails
+            if data["product_region_found"] and data["rendered_product_cards"] == 0 and data["reported_product_count"] > 0:
                 page.wait_for_timeout(3000)
-                data = page.evaluate(JS_EXTRACT_SCRIPT)
-                if data["rendered_product_cards"] == 0:
-                    page.reload(wait_until="domcontentloaded")
-                    page.wait_for_timeout(3000)
-                    for _ in range(10):
-                        page.evaluate("window.scrollBy(0, 800)")
-                        page.wait_for_timeout(600)
-                    data = page.evaluate(JS_EXTRACT_SCRIPT)
+                data2 = page.evaluate(JS_EXTRACT_SCRIPT)
+                if data2["rendered_product_cards"] == 0:
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=20000)
+                        page.evaluate('''
+                            () => new Promise(resolve => {
+                                let attempts = 0;
+                                const interval = setInterval(() => {
+                                    window.scrollBy(0, 800);
+                                    if (++attempts >= 30) {
+                                        clearInterval(interval);
+                                        resolve();
+                                    }
+                                }, 300);
+                            })
+                        ''')
+                        data3 = page.evaluate(JS_EXTRACT_SCRIPT)
+                        if data3["rendered_product_cards"] > 0 or not data3["product_loading_skeleton"]:
+                            data = data3
+                        else:
+                            data["audit_notes"].append("Reload retry completed but still suspicious.")
+                    except Exception as e:
+                        data["audit_notes"].append("Reload retry timed out; retained first rendered-DOM result.")
+                else:
+                    data = data2
             
             data["http_status"] = result["HTTP Status"]
             status = assign_page_status(data)
@@ -348,7 +430,13 @@ def process_single_url(url: str) -> dict:
             result["Sample Q&A Questions"] = " | ".join(data["sample_qa"])
             result["Q&A Detection Method"] = data["qa_detection_method"]
             result["Page Status"] = status
-            result["Audit Evidence"] = " ".join(data["audit_notes"])
+            
+            # Combine audit notes and debug strings
+            audit_str = " ".join(data["audit_notes"])
+            if data.get("debug_candidates"):
+                audit_str += " | BOPC Candidates: " + " ; ".join([f"[{c['Component Name']}] chars={c['Text Characters']} headings={c['Heading Count']} -> {c['Excluded Reason'] if 'Excluded Reason' in c else 'BOPC!'}" for c in data["debug_candidates"]])
+            
+            result["Audit Evidence"] = audit_str
             result["Component Sequence"] = " > ".join(data["component_sequence"])
             
         except Exception as e:
