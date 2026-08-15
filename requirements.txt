@@ -3,3 +3,4 @@ openpyxl>=3.1,<4
 selenium>=4.20,<5
 google-generativeai>=0.8,<1
 playwright>=1.40,<2
+extra-streamlit-components>=0.1.71,<1
