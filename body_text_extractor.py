@@ -1,6 +1,8 @@
 import io
 import math
 import hashlib
+import re
+import markdownify
 import time
 import subprocess
 import streamlit as st
@@ -118,13 +120,17 @@ def _process_chunk(chunk, progress_queue):
                     for (let el of elementsToRemove) {
                         el.remove();
                     }
-                    return clone.textContent;
+                    return clone.innerHTML;
                 }
                 """
-                inner_text = page.evaluate(extract_script)
+                raw_html = page.evaluate(extract_script)
                 
-                if inner_text:
-                    cleaned_text = " ".join(inner_text.split())
+                if raw_html:
+                    # Convert HTML to clean Markdown preserving headings and paragraphs
+                    md_text = markdownify.markdownify(raw_html, heading_style="ATX", strip=['img', 'svg'])
+                    
+                    # Clean up excessive newlines
+                    cleaned_text = re.sub(r'\\n{3,}', '\\n\\n', md_text).strip()
                     
                     # Append dynamically captured FAQs at the bottom if any were found
                     if faq_extracted:
