@@ -2,7 +2,7 @@ import hmac
 import streamlit as st
 import extra_streamlit_components as stx
 
-@st.cache_resource(experimental_allow_widgets=True)
+@st.cache_resource
 def get_manager():
     return stx.CookieManager()
 
