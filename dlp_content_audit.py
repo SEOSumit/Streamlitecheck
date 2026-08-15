@@ -70,54 +70,75 @@ JS_EXTRACT_SCRIPT = r"""
     }
 
     // Reported count
-    const countRegex = /([0-9,]+)\s*(件の検索結果|件|results|products|Items)/i;
-    if (productRoot && productRoot !== document.body) {
-        const match = productRoot.innerText.match(countRegex);
-        if (match) data.reported_product_count = parseInt(match[1].replace(/,/g, ''), 10);
-    }
-    if (data.reported_product_count === 0) {
-        const bodyMatch = document.body.innerText.match(countRegex);
-        if (bodyMatch) data.reported_product_count = parseInt(bodyMatch[1].replace(/,/g, ''), 10);
+            data.reported_product_count = 1; // Assuming exists if region exists
+        }
+    } else {
+        // Generic product region
+        const grids = Array.from(mainRegion.querySelectorAll('.product-grid, .product-list, [data-product-list], ul.products'));
+        if (grids.length > 0) {
+            data.product_region_found = true;
+            productRoot = grids[0];
+            data.product_detection_method = "Generic product grid";
+            data.reported_product_count = 1;
+        }
     }
 
     // Skeletons
-    if (document.querySelector('.pc_dlp_skeleton_box, .skeleton_product_card, .skeleton_product, .skeleton')) {
-        data.product_loading_skeleton = true;
-    }
+    const skeletons = Array.from(mainRegion.querySelectorAll('.pc_dlp_skeleton_box, .skeleton_product_card, .skeleton_product, .skeleton'));
+    data.product_loading_skeleton = skeletons.some(isVisible);
 
-    // Rendered cards
+    // Rendered cards hierarchy
     let cards = [];
     if (productRoot !== document.body) {
-        cards = Array.from(productRoot.querySelectorAll('.product-card:not(.skeleton_product):not(.skeleton), .product-item:not(.skeleton), [data-product-id], .list-item, article, [data-testid="product-card"]'));
-    }
-    if (cards.length === 0) {
-        // generic fallback
-        cards = Array.from(document.querySelectorAll('.card, .item, article')).filter(c => c.innerText.match(/¥|\\$|€|£/));
-        if (cards.length > 0 && !data.product_region_found) {
-            data.product_region_found = true;
-            data.product_detection_method = "Generic product card heuristic";
+        // 1. Known selectors
+        cards = Array.from(productRoot.querySelectorAll('.product-item, .product-card, [data-product-id], .list-item, [data-testid="product-card"]')).filter(isVisible).filter(c => !c.className.includes('skeleton'));
+        
+        // 2. Structural discovery if 0
+        if (cards.length === 0) {
+            const links = Array.from(productRoot.querySelectorAll('a[href]')).filter(isVisible);
+            const parentMap = new Map();
+            links.forEach(a => {
+                let p = a.parentElement;
+                while (p && p !== productRoot && p.tagName !== 'BODY') {
+                    if (p.querySelector('img') && p.innerText.match(/[0-9]/) && !p.className.includes('skeleton')) {
+                        parentMap.set(p, (parentMap.get(p) || 0) + 1);
+                    }
+                    p = p.parentElement;
+                }
+            });
+            let bestRoot = null;
+            let maxCount = 0;
+            for (let [p, count] of parentMap.entries()) {
+                if (count > maxCount && count > 1) {
+                    maxCount = count;
+                    bestRoot = p;
+                }
+            }
+            if (bestRoot) {
+                cards = Array.from(bestRoot.children).filter(isVisible).filter(c => !c.className.includes('skeleton') && c.querySelector('a'));
+                data.product_detection_method = "Structural repeated containers";
+            }
         }
     }
 
     // Deduplicate cards
     let seenCards = new Set();
     cards.forEach(c => {
-        if (!c.closest('.skeleton') && !c.className.includes('skeleton') && !c.className.includes('skeleton_product')) {
-            const link = c.querySelector('a');
-            const title = link ? link.innerText.trim() : c.innerText.trim().split('\\n')[0];
-            const key = (link && link.href) ? link.href : title;
-            if (key && !seenCards.has(key)) {
-                seenCards.add(key);
-                data.rendered_product_cards++;
-                if (data.sample_products.length < 3) {
-                    data.sample_products.push(title.substring(0, 50).replace(/\\n/g, ' '));
-                }
+        const link = c.querySelector('a');
+        const title = link ? link.innerText.trim() : c.innerText.trim().split('\n')[0];
+        const url = (link && link.href) ? link.href : title;
+        const key = url || title;
+        if (key && !seenCards.has(key)) {
+            seenCards.add(key);
+            data.rendered_product_cards++;
+            if (data.sample_products.length < 3) {
+                data.sample_products.push(title.substring(0, 50).replace(/\n/g, ' '));
             }
         }
     });
     
     let productBottom = 0;
-    if (productRoot !== document.body) {
+    if (productRoot && productRoot !== document.body && isVisible(productRoot)) {
         productBottom = productRoot.getBoundingClientRect().bottom + window.scrollY;
     } else if (cards.length > 0) {
         const lastCard = cards[cards.length - 1];
@@ -133,23 +154,22 @@ JS_EXTRACT_SCRIPT = r"""
     }
 
     // 3. Q&A
-    const faqs = document.querySelectorAll('.faqs .sectionLi');
-    if (faqs.length > 0) {
+    const faqs = mainRegion.querySelectorAll('.faqs .sectionLi');
+    if (faqs.length > 0 && Array.from(faqs).some(isVisible)) {
         data.qa_available = true;
-        data.qa_count = faqs.length;
+        data.qa_count = Array.from(faqs).filter(isVisible).length;
         data.qa_detection_method = "Site-specific FAQ selector";
-        data.component_sequence.push("FAQ(site-specific)");
         for (let i = 0; i < Math.min(3, faqs.length); i++) {
             const titleEl = faqs[i].querySelector('h3, .se-sl-ti');
             if (titleEl) data.sample_qa.push(titleEl.innerText.trim());
         }
     } else {
         // Generic fallback
-        const accordions = Array.from(document.querySelectorAll('details, [aria-expanded], [data-accordion]'))
+        const accordions = Array.from(mainRegion.querySelectorAll('details, [aria-expanded], [data-accordion]'))
+            .filter(isVisible)
             .filter(el => {
-                const rect = el.getBoundingClientRect();
-                const top = rect.top + window.scrollY;
-                return top > productBottom && top < footerTop && !el.closest('nav') && !el.closest('aside') && !el.closest('.filter') && !el.className.includes('filter');
+                const top = el.getBoundingClientRect().top + window.scrollY;
+                return top > productBottom && top < footerTop && !el.closest('nav, aside, .filter, header');
             });
         
         let parents = new Map();
@@ -163,7 +183,6 @@ JS_EXTRACT_SCRIPT = r"""
                 data.qa_available = true;
                 data.qa_count = count;
                 data.qa_detection_method = "Generic accordion heuristic";
-                data.component_sequence.push("FAQ(generic)");
                 const items = Array.from(p.querySelectorAll('details summary, [aria-expanded]'));
                 for (let i = 0; i < Math.min(3, items.length); i++) {
                     data.sample_qa.push(items[i].innerText.trim());
@@ -173,41 +192,24 @@ JS_EXTRACT_SCRIPT = r"""
         }
     }
 
-    // 4. BOPC
-    const candidateRoots = Array.from(document.querySelectorAll('div, section, article, [componentname], [componentName]')).filter(c => {
-        const rect = c.getBoundingClientRect();
-        const top = rect.top + window.scrollY;
-        const bottom = rect.bottom + window.scrollY;
-        return c.offsetParent !== null && top >= productBottom && bottom <= footerTop + 100 && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE' && c.tagName !== 'LINK';
-    });
+    // Component Sequence & BOPC
+    const topLevelElements = Array.from(mainRegion.children).flatMap(c => {
+        if (c.tagName === 'DIV' && c.children.length === 1) return Array.from(c.children); // unwrap trivial div
+        return [c];
+    }).filter(isVisible);
 
-    for (const root of candidateRoots) {
-        if (root.querySelector('.faqs') || root.classList.contains('faqs')) continue;
-        if (data.qa_available && data.qa_detection_method.includes('generic') && root.querySelector('details, [aria-expanded]')) continue;
-        if (root.tagName === 'NAV' || root.tagName === 'HEADER' || root.tagName === 'FOOTER' || root.closest('nav, header, footer')) continue;
+    let bopcFound = false;
 
-        const compName = root.getAttribute('componentname') || root.getAttribute('componentName') || root.className || "";
-        const isLenovoBOPC = (typeof compName === 'string' && (compName.includes('ofp-Bottom-Content') || compName.includes('htmlUpload')));
+    topLevelElements.forEach((c, index) => {
+        const top = c.getBoundingClientRect().top + window.scrollY;
+        const bottom = c.getBoundingClientRect().bottom + window.scrollY;
         
-        const text = root.innerText.trim();
+        const compName = c.getAttribute('componentname') || c.getAttribute('componentName') || c.id || c.className || "Block";
+        const isFaq = c.querySelector('.faqs') || c.classList.contains('faqs') || (data.qa_available && data.qa_detection_method.includes('generic') && c.querySelector('details, [aria-expanded]'));
+        const isProduct = c === productRoot || c.contains(productRoot);
+        const text = c.innerText.trim();
         const charCount = text.length;
         
-        const headings = Array.from(root.querySelectorAll('h1, h2, h3, h4'));
-        const paragraphs = Array.from(root.querySelectorAll('p, li'));
-        
-        let isMeaningful = false;
-        if (charCount >= 300 && headings.length >= 1 && paragraphs.length >= 2) {
-            isMeaningful = true;
-        }
-
-        if (isMeaningful) {
-            data.bopc_available = true;
-            data.bopc_char_count = charCount;
-            data.bopc_heading_count = headings.length;
-            data.bopc_headings = headings.slice(0, 3).map(h => h.innerText.trim().replace(/\\n/g, ' '));
-            
-            if (isLenovoBOPC) {
-                data.bopc_detection_method = "Site-specific content component + structural qualification";
                 data.component_sequence.push(`BOPC(lenovo-adapter)`);
             } else {
                 data.bopc_detection_method = "Generic structural long-form block";
