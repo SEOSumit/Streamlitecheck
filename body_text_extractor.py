@@ -43,8 +43,25 @@ def _process_chunk(chunk, progress_queue):
                 page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 page.wait_for_timeout(2000) # 2s fixed wait
                 
-                # Extract innerText
-                inner_text = page.evaluate("document.body.innerText")
+                # Extract text content including hidden elements (like closed accordions)
+                # We remove scripts, styles, etc., to avoid polluting the text
+                # We also remove header, footer, nav, and aside to focus on the main body
+                extract_script = """
+                () => {
+                    const clone = document.body.cloneNode(true);
+                    const elementsToRemove = clone.querySelectorAll(
+                        "script, style, noscript, iframe, link, meta, svg, " +
+                        "header, footer, nav, aside, " +
+                        "[role='navigation'], [role='banner'], [role='contentinfo'], " +
+                        "#header, #footer"
+                    );
+                    for (let el of elementsToRemove) {
+                        el.remove();
+                    }
+                    return clone.textContent;
+                }
+                """
+                inner_text = page.evaluate(extract_script)
                 
                 if inner_text:
                     cleaned_text = " ".join(inner_text.split())
