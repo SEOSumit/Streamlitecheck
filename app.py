@@ -20,6 +20,7 @@ from xml_sitemap import (
 )
 from internal_extractor import extract_internal_links_tool
 from body_text_extractor import bulk_body_text_extractor_tool
+from dlp_content_audit import dlp_content_audit_tool
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
@@ -34,7 +35,7 @@ render_logout_button()
 st.sidebar.title("SEO Toolkit")
 selected_tool = st.sidebar.radio(
     "Select a tool",
-    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export", "Internal Link & Anchor Extractor", "Bulk Body Text Extractor"],
+    ["Internal Link Checker", "HTML Sitemap Audit", "XML Sitemap Export", "Internal Link & Anchor Extractor", "Bulk Body Text Extractor", "Category/DLP Content & Product Audit"],
 )
 
 
@@ -347,3 +348,5 @@ elif selected_tool == "Internal Link & Anchor Extractor":
     extract_internal_links_tool()
 elif selected_tool == "Bulk Body Text Extractor":
     bulk_body_text_extractor_tool()
+elif selected_tool == "Category/DLP Content & Product Audit":
+    dlp_content_audit_tool()
