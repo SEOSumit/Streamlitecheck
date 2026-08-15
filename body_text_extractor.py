@@ -43,6 +43,65 @@ def _process_chunk(chunk, progress_queue):
                 page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 page.wait_for_timeout(2000) # 2s fixed wait
                 
+                # --- NEW LOGIC: Click Read More and FAQs, capturing dynamic Q&A ---
+                faq_extracted = []
+                try:
+                    # 1. Click "Read More" buttons to reveal BOPC
+                    read_more_btns = page.locator('button, [role="button"], .readMore, span.readTab')
+                    count = read_more_btns.count()
+                    for i in range(count):
+                        btn = read_more_btns.nth(i)
+                        try:
+                            if btn.is_visible():
+                                text = btn.inner_text().strip().lower()
+                                if "read more" in text or "show more" in text:
+                                    btn.click(timeout=1500)
+                                    page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+
+                    # 2. Click FAQs and capture their content immediately
+                    accordion_btns = page.locator('.accordionContainer button, .faq button, .q-a button, [class*="faq" i] button, details summary')
+                    count = accordion_btns.count()
+                    for i in range(count):
+                        btn = accordion_btns.nth(i)
+                        try:
+                            if btn.is_visible():
+                                text = btn.inner_text().strip()
+                                is_faq = "?" in text or btn.evaluate("el => el.closest('.accordionContainer, .faq, .q-a') !== null")
+                                if is_faq and len(text) > 5:
+                                    btn.scroll_into_view_if_needed(timeout=1000)
+                                    btn.click(timeout=1500)
+                                    page.wait_for_timeout(500) # Wait for animation/render
+                                    
+                                    # Extract answer
+                                    answer_text = ""
+                                    controls = btn.get_attribute("aria-controls")
+                                    if controls:
+                                        region = page.locator(f'#{controls}')
+                                        if region.count() > 0:
+                                            answer_text = region.inner_text().strip()
+                                    
+                                    if not answer_text:
+                                        answer_text = btn.evaluate("""el => {
+                                            let next = el.nextElementSibling;
+                                            if (!next && el.parentElement) {
+                                                next = el.parentElement.nextElementSibling;
+                                            }
+                                            // Handle specific nested structure in Lenovo accordions
+                                            if (!next && el.parentElement && el.parentElement.parentElement) {
+                                                next = el.parentElement.parentElement.nextElementSibling;
+                                            }
+                                            return next ? next.innerText : '';
+                                        }""")
+                                    
+                                    if answer_text and len(answer_text.strip()) > 5:
+                                        faq_extracted.append(f"**Q: {text}**\\n\\nA: {answer_text.strip()}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                
                 # Extract text content including hidden elements (like closed accordions)
                 # We remove scripts, styles, etc., to avoid polluting the text
                 # We also remove header, footer, nav, and aside to focus on the main body
@@ -65,6 +124,13 @@ def _process_chunk(chunk, progress_queue):
                 
                 if inner_text:
                     cleaned_text = " ".join(inner_text.split())
+                    
+                    # Append dynamically captured FAQs at the bottom if any were found
+                    if faq_extracted:
+                        # We use \n\n for proper markdown spacing
+                        faq_section = "\\n\\n### Extracted FAQ Pairs:\\n\\n" + "\\n\\n".join(faq_extracted)
+                        cleaned_text += faq_section
+                        
                     results.append({"url": url, "text": cleaned_text, "error": None})
                 else:
                     results.append({"url": url, "text": None, "error": "ERROR: No body text found"})
