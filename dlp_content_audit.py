@@ -89,7 +89,7 @@ JS_EXTRACT_SCRIPT = r"""
         }
     } else {
         // Generic product region
-        const grids = Array.from(mainRegion.querySelectorAll('.product-grid, .product-list, [data-product-list], ul.products'));
+        const grids = Array.from(mainRegion.querySelectorAll('.product-grid, .product-list, .product_list, .productList_container, [data-product-list], ul.products'));
         if (grids.length > 0) {
             data.product_region_found = true;
             productRoot = grids[0];
@@ -106,7 +106,7 @@ JS_EXTRACT_SCRIPT = r"""
     let cards = [];
     if (productRoot !== document.body) {
         // 1. Known selectors
-        cards = Array.from(productRoot.querySelectorAll('.product-item, .product-card, [data-product-id], .list-item, [data-testid="product-card"]')).filter(isVisible).filter(c => !c.className.includes('skeleton'));
+        cards = Array.from(productRoot.querySelectorAll('.product-item, .product-card, .product_item, .product_card, [data-product-id], .list-item, [data-testid="product-card"]')).filter(isVisible).filter(c => !c.className.includes('skeleton'));
         
         // 2. Structural discovery if 0
         if (cards.length === 0) {
@@ -130,9 +130,9 @@ JS_EXTRACT_SCRIPT = r"""
             let bestClass = null;
             let maxC = 0;
             for (let [k, v] of classCounts.entries()) {
-                if (v > maxC) { maxC = v; bestClass = k; }
+                if (v > maxC && v >= 2) { maxC = v; bestClass = k; }
             }
-            if (bestClass) {
+            if (bestClass && maxC >= 2) {
                 cards = Array.from(new Set(candidates.filter(c => (c.tagName + "|" + c.className) === bestClass)));
                 data.product_detection_method = "Structural repeated containers";
             }
@@ -190,7 +190,9 @@ JS_EXTRACT_SCRIPT = r"""
             .filter(isVisible)
             .filter(el => {
                 const top = el.getBoundingClientRect().top + window.scrollY;
-                return top > productBottom && top < footerTop && !el.closest('nav, aside, .filter, header');
+                if (top > footerTop || el.closest('nav, aside, .filter, header')) return false;
+                const text = el.innerText.trim();
+                return text.includes('?') || el.closest('.faq, .q-a, .questions, [class*="faq" i], [class*="question" i]');
             });
         
         let parents = new Map();
@@ -234,11 +236,11 @@ JS_EXTRACT_SCRIPT = r"""
         data.component_sequence.push(`${c.tagName.toLowerCase()}(${String(compName).substring(0,25)})[${charCount} chars]`);
 
         // BOPC Candidates
-        if (top >= productBottom && bottom <= footerTop + 100 && !isFaq && !isProduct) {
+        if (bottom <= footerTop + 100 && !isFaq) {
             if (c.tagName === 'NAV' || c.tagName === 'HEADER' || c.tagName === 'FOOTER') return;
 
             const headings = Array.from(c.querySelectorAll('h1, h2, h3, h4, h5')).filter(isVisible).map(h => h.innerText.trim()).filter(h => h.length > 0);
-            const paragraphs = Array.from(c.querySelectorAll('p')).filter(isVisible);
+            const paragraphs = Array.from(c.querySelectorAll('p, .text')).filter(isVisible).filter(p => p.innerText.trim().length > 40);
             
             const debugObj = {
                 "DOM Order": index,
@@ -253,19 +255,23 @@ JS_EXTRACT_SCRIPT = r"""
                 "BOPC Yes/No": "No"
             };
 
-            if (!bopcFound && charCount > 300 && headings.length >= 1 && paragraphs.length >= 2) {
-                bopcFound = true;
-                debugObj["BOPC Yes/No"] = "Yes";
-                data.bopc_available = true;
-                data.bopc_char_count = charCount;
-                data.bopc_heading_count = headings.length;
-                data.bopc_headings = headings.slice(0, 3);
-                
-                const isLenovoBOPC = (typeof compName === 'string' && (compName.includes('ofp-Bottom-Content') || compName.includes('htmlUpload')));
-                data.bopc_detection_method = isLenovoBOPC ? "Site-specific long-form block" : "Generic structural long-form block";
-                data.component_sequence[data.component_sequence.length - 1] += " -> BOPC!";
+            if (!bopcFound && charCount > 300 && headings.length >= 1 && paragraphs.length >= 1) {
+                if (!isProduct || (charCount > 1500 && paragraphs.length >= 3)) {
+                    bopcFound = true;
+                    debugObj["BOPC Yes/No"] = "Yes";
+                    data.bopc_available = true;
+                    data.bopc_char_count = charCount;
+                    data.bopc_heading_count = headings.length;
+                    data.bopc_headings = headings.slice(0, 3);
+                    
+                    const isLenovoBOPC = (typeof compName === 'string' && (compName.includes('ofp-Bottom-Content') || compName.includes('htmlUpload')));
+                    data.bopc_detection_method = isLenovoBOPC ? "Site-specific long-form block" : "Generic structural long-form block";
+                    data.component_sequence[data.component_sequence.length - 1] += " -> BOPC!";
+                } else {
+                    debugObj["Excluded Reason"] = "Container is primarily product grid";
+                }
             } else if (!bopcFound) {
-                debugObj["Excluded Reason"] = "Thresholds not met (chars>300, headings>=1, paragraphs>=2)";
+                debugObj["Excluded Reason"] = "Thresholds not met (chars>300, headings>=1, paragraphs>=1)";
             }
             data.debug_candidates.push(debugObj);
         }
