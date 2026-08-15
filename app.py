@@ -23,6 +23,14 @@ from body_text_extractor import bulk_body_text_extractor_tool
 
 
 st.set_page_config(page_title="SEO Toolkit", page_icon="🔎", layout="wide")
+
+from auth import check_password, render_logout_button
+
+if not check_password():
+    st.stop()
+
+render_logout_button()
+
 st.sidebar.title("SEO Toolkit")
 selected_tool = st.sidebar.radio(
     "Select a tool",
