@@ -1,4 +1,5 @@
 import io
+import math
 import hashlib
 import time
 import subprocess
@@ -163,8 +164,9 @@ def process_body_text_extractor(urls, progress_callback, max_workers):
 
     ensure_playwright_installed()
 
-    # Split into chunks of 50 to prevent browser memory leaks on very large lists
-    chunk_size = 50
+    # Distribute URLs evenly across the available workers so concurrency is fully utilized
+    # Ensure chunk size is at least 1, and no more than 50 (to prevent memory leaks)
+    chunk_size = min(50, max(1, math.ceil(total_urls / max_workers)))
     chunks = [urls[i:i + chunk_size] for i in range(0, total_urls, chunk_size)]
     
     all_results = []
