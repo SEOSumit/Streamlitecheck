@@ -37,122 +37,146 @@ def _process_chunk(chunk, progress_queue):
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        # Add a realistic User-Agent to avoid getting blocked by Cloudflare/Akamai
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
 
         for url in chunk:
             page = None
-            try:
-                page = context.new_page()
-                page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                page.wait_for_timeout(2000) # 2s fixed wait
-                
-                # --- NEW LOGIC: Click Read More and FAQs, capturing dynamic Q&A ---
-                faq_extracted = []
+            extracted = False
+            last_error_msg = ""
+            
+            for attempt in range(2): # Try up to 2 times
                 try:
-                    # 1. Click "Read More" buttons to reveal BOPC
-                    read_more_btns = page.locator('button, [role="button"], .readMore, span.readTab')
-                    count = read_more_btns.count()
-                    for i in range(count):
-                        btn = read_more_btns.nth(i)
-                        try:
-                            if btn.is_visible():
-                                text = btn.inner_text().strip().lower()
-                                if "read more" in text or "show more" in text:
-                                    btn.click(timeout=1500)
-                                    page.wait_for_timeout(300)
-                        except Exception:
-                            pass
-
-                    # 2. Click FAQs and capture their content immediately
-                    accordion_btns = page.locator('.accordionContainer button, .faq button, .q-a button, [class*="faq" i] button, details summary')
-                    count = accordion_btns.count()
-                    for i in range(count):
-                        btn = accordion_btns.nth(i)
-                        try:
-                            if btn.is_visible():
-                                text = btn.inner_text().strip()
-                                is_faq = "?" in text or btn.evaluate("el => el.closest('.accordionContainer, .faq, .q-a') !== null")
-                                if is_faq and len(text) > 5:
-                                    btn.scroll_into_view_if_needed(timeout=1000)
-                                    btn.click(timeout=1500)
-                                    page.wait_for_timeout(500) # Wait for animation/render
-                                    
-                                    # Extract answer
-                                    answer_text = ""
-                                    controls = btn.get_attribute("aria-controls")
-                                    if controls:
-                                        region = page.locator(f'#{controls}')
-                                        if region.count() > 0:
-                                            answer_text = region.inner_text().strip()
-                                    
-                                    if not answer_text:
-                                        answer_text = btn.evaluate("""el => {
-                                            let next = el.nextElementSibling;
-                                            if (!next && el.parentElement) {
-                                                next = el.parentElement.nextElementSibling;
-                                            }
-                                            // Handle specific nested structure in Lenovo accordions
-                                            if (!next && el.parentElement && el.parentElement.parentElement) {
-                                                next = el.parentElement.parentElement.nextElementSibling;
-                                            }
-                                            return next ? next.innerText : '';
-                                        }""")
-                                    
-                                    if answer_text and len(answer_text.strip()) > 5:
-                                        faq_extracted.append(f"**Q: {text}**\\n\\nA: {answer_text.strip()}")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                
-                # Extract text content including hidden elements (like closed accordions)
-                # We remove scripts, styles, etc., to avoid polluting the text
-                # We also remove header, footer, nav, and aside to focus on the main body
-                extract_script = """
-                () => {
-                    const clone = document.body.cloneNode(true);
-                    const elementsToRemove = clone.querySelectorAll(
-                        "script, style, noscript, iframe, link, meta, svg, " +
-                        "header, footer, nav, aside, " +
-                        "[role='navigation'], [role='banner'], [role='contentinfo'], " +
-                        "#header, #footer"
-                    );
-                    for (let el of elementsToRemove) {
-                        el.remove();
-                    }
-                    return clone.innerHTML;
-                }
-                """
-                raw_html = page.evaluate(extract_script)
-                
-                if raw_html:
-                    # Convert HTML to clean Markdown preserving headings and paragraphs
-                    md_text = markdownify.markdownify(raw_html, heading_style="ATX", strip=['img', 'svg'])
+                    page = context.new_page()
+                    # Increase timeout to 30s to help with slow JS pages
+                    page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    page.wait_for_timeout(1000) # 1s fixed wait instead of 2s
                     
-                    # Clean up excessive newlines
-                    cleaned_text = re.sub(r'\\n{3,}', '\\n\\n', md_text).strip()
-                    
-                    # Append dynamically captured FAQs at the bottom if any were found
-                    if faq_extracted:
-                        # We use \n\n for proper markdown spacing
-                        faq_section = "\\n\\n### Extracted FAQ Pairs:\\n\\n" + "\\n\\n".join(faq_extracted)
-                        cleaned_text += faq_section
-                        
-                    results.append({"url": url, "text": cleaned_text, "error": None})
-                else:
-                    results.append({"url": url, "text": None, "error": "ERROR: No body text found"})
-                    
-            except Exception as e:
-                error_msg = f"ERROR: {str(e).splitlines()[0]}"
-                results.append({"url": url, "text": None, "error": error_msg})
-            finally:
-                if page:
+                    # --- NEW LOGIC: Click Read More and FAQs, capturing dynamic Q&A ---
+                    faq_extracted = []
                     try:
-                        page.close()
+                        # 1. Click "Read More" buttons to reveal BOPC
+                        read_more_btns = page.locator('button, [role="button"], .readMore, span.readTab')
+                        count = read_more_btns.count()
+                        for i in range(count):
+                            btn = read_more_btns.nth(i)
+                            try:
+                                if btn.is_visible():
+                                    text = btn.inner_text().strip().lower()
+                                    if "read more" in text or "show more" in text:
+                                        btn.click(timeout=500)
+                                        page.wait_for_timeout(100)
+                            except Exception:
+                                pass
+
+                        # 2. Click FAQs and capture their content immediately
+                        accordion_btns = page.locator('.accordionContainer button, .faq button, .q-a button, [class*="faq" i] button, details summary')
+                        count = accordion_btns.count()
+                        for i in range(count):
+                            btn = accordion_btns.nth(i)
+                            try:
+                                if btn.is_visible():
+                                    text = btn.inner_text().strip()
+                                    is_faq = "?" in text or btn.evaluate("el => el.closest('.accordionContainer, .faq, .q-a') !== null")
+                                    if is_faq and len(text) > 5:
+                                        btn.scroll_into_view_if_needed(timeout=500)
+                                        btn.click(timeout=500)
+                                        page.wait_for_timeout(200) # Wait for animation/render
+                                    
+                                        # Extract answer
+                                        answer_text = ""
+                                        controls = btn.get_attribute("aria-controls")
+                                        if controls:
+                                            region = page.locator(f'#{controls}')
+                                            if region.count() > 0:
+                                                answer_text = region.inner_text().strip()
+                                    
+                                        if not answer_text:
+                                            answer_text = btn.evaluate("""el => {
+                                                let next = el.nextElementSibling;
+                                                if (!next && el.parentElement) {
+                                                    next = el.parentElement.nextElementSibling;
+                                                }
+                                                // Handle specific nested structure in Lenovo accordions
+                                                if (!next && el.parentElement && el.parentElement.parentElement) {
+                                                    next = el.parentElement.parentElement.nextElementSibling;
+                                                }
+                                                return next ? next.innerText : '';
+                                            }""")
+                                    
+                                        if answer_text and len(answer_text.strip()) > 5:
+                                            faq_extracted.append(f"**Q: {text}**\\n\\nA: {answer_text.strip()}")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
+                
+                    # Extract text content including hidden elements (like closed accordions)
+                    # We remove scripts, styles, etc., to avoid polluting the text
+                    # We also remove header, footer, nav, and aside to focus on the main body
+                    extract_script = """
+                    () => {
+                        const clone = document.body.cloneNode(true);
+                        const elementsToRemove = clone.querySelectorAll(
+                            "script, style, noscript, iframe, link, meta, svg, " +
+                            "header, footer, nav, aside, " +
+                            "[role='navigation'], [role='banner'], [role='contentinfo'], " +
+                            "#header, #footer"
+                        );
+                        for (let el of elementsToRemove) {
+                            el.remove();
+                        }
+                        return clone.innerHTML;
+                    }
+                    """
+                    raw_html = page.evaluate(extract_script)
+                
+                    if raw_html:
+                        # Convert HTML to clean Markdown preserving headings and paragraphs
+                        md_text = markdownify.markdownify(raw_html, heading_style="ATX", strip=['img', 'svg'])
+                    
+                        # Clean up excessive newlines
+                        cleaned_text = re.sub(r'\\n{3,}', '\\n\\n', md_text).strip()
+                    
+                        # Append dynamically captured FAQs at the bottom if any were found
+                        if faq_extracted:
+                            # We use \n\n for proper markdown spacing
+                            faq_section = "\\n\\n### Extracted FAQ Pairs:\\n\\n" + "\\n\\n".join(faq_extracted)
+                            cleaned_text += faq_section
+                        
+                        if cleaned_text.strip():
+                            results.append({"url": url, "text": cleaned_text, "error": None})
+                            extracted = True
+                            break # Success! Break out of the retry loop
+                        else:
+                            last_error_msg = "No text found in DOM"
+                        
+                except Exception as e:
+                    # We specifically handle timeout errors to make the log clearer
+                    error_str = str(e)
+                    if "Timeout" in error_str:
+                        last_error_msg = "Timeout: Page took too long to load"
+                    elif "net::ERR_" in error_str:
+                        last_error_msg = f"Network Error: {error_str.split('net::')[1].split(' at ')[0]}"
+                    else:
+                        last_error_msg = f"Error: {error_str.splitlines()[0]}"
+                finally:
+                    if page:
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+                
+                # If we get here, it means we failed. Wait a bit before retrying.
+                if not extracted and attempt == 0:
+                    time.sleep(2)
+
+            if not extracted:
+                results.append({"url": url, "text": None, "error": last_error_msg})
             
-            # Delay between requests
+            # Delay between different URLs to avoid triggering rate limits
             time.sleep(0.5)
             progress_queue.put(1)
             
@@ -196,11 +220,11 @@ def process_body_text_extractor(urls, progress_callback, max_workers):
         for f in futures:
             try:
                 all_results.extend(f.result())
-            except Exception as e:
-                # Fallback if a whole chunk fails completely
+            except Exception:
                 pass
 
     markdown_lines = []
+    errors_list = []
     success_count = 0
     error_count = 0
     
@@ -211,7 +235,8 @@ def process_body_text_extractor(urls, progress_callback, max_workers):
             markdown_lines.append(f"## {url}\n\n{res['text']}\n\n---")
             success_count += 1
         else:
-            markdown_lines.append(f"## {url}\n\n{res['error']}\n\n---")
+            markdown_lines.append(f"## {url}\n\nERROR: {res['error']}\n\n---")
+            errors_list.append({"URL": url, "Error": res["error"]})
             error_count += 1
 
     markdown_output = "\n".join(markdown_lines)
@@ -219,7 +244,8 @@ def process_body_text_extractor(urls, progress_callback, max_workers):
     stats = {
         "total": total_urls,
         "success": success_count,
-        "error": error_count
+        "error": error_count,
+        "errors_list": errors_list
     }
     
     return markdown_output, stats
@@ -250,7 +276,7 @@ def bulk_body_text_extractor_tool() -> None:
     st.caption("Extract rendered body text from a list of URLs directly to an AI-friendly Markdown (.md) file.")
     
     mode = st.radio("Input Mode", ["Paste URL List", "Bulk Excel Upload"], horizontal=True)
-    workers = st.slider("Max Concurrent Browsers", 1, 5, 3, help="Higher is faster but uses more memory. Reduce to 1 or 2 if the app crashes on large files.")
+    workers = st.slider("Max Concurrent Browsers", 1, 10, 5, help="Higher is faster but uses more memory. Reduce if the app crashes.")
     
     # Reset state if mode changes or new files uploaded
     def clear_state():
@@ -308,3 +334,20 @@ def bulk_body_text_extractor_tool() -> None:
             use_container_width=True,
             type="primary"
         )
+        
+        if stats["error"] > 0:
+            st.divider()
+            st.subheader(f"⚠️ {stats['error']} Errors Found")
+            st.caption("The following URLs could not be extracted. This is usually caused by network blocks, timeouts, or the page returning 404/Access Denied.")
+            
+            # Display errors in a table
+            st.dataframe(stats["errors_list"], use_container_width=True)
+            
+            # Provide error log download
+            error_log_text = "\\n".join([f"{err['URL']} -> {err['Error']}" for err in stats["errors_list"]])
+            st.download_button(
+                "Download Error Log (.txt)",
+                data=error_log_text,
+                file_name="Extraction_Errors.txt",
+                mime="text/plain"
+            )
