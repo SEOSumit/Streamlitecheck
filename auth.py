@@ -46,7 +46,7 @@ def check_password() -> bool:
 
 def render_logout_button():
     """Renders a logout button in the sidebar."""
-    cookie_manager = get_manager()
+    cookie_manager = stx.CookieManager(key="auth_cookie_manager_logout")
     if st.sidebar.button("Logout"):
         st.session_state["password_correct"] = False
         cookie_manager.delete("auth_token")
