@@ -2,9 +2,8 @@ import hmac
 import streamlit as st
 import extra_streamlit_components as stx
 
-@st.cache_resource
 def get_manager():
-    return stx.CookieManager()
+    return stx.CookieManager(key="auth_cookie_manager")
 
 def check_password() -> bool:
     """Returns `True` if the user had the correct password."""
